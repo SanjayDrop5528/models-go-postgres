@@ -1,7 +1,7 @@
 package postgres_test
 
 import (
-	"models-go/adapters/postgres"
+	"github.com/SanjayDrop5528/models-go-postgres"
 	"github.com/SanjayDrop5528/models-go-engine/diff"
 	"github.com/SanjayDrop5528/models-go-engine/model"
 	"github.com/SanjayDrop5528/models-go-engine/schema"
