@@ -154,6 +154,10 @@ func (b *QueryBuilder) buildWhere(filters []query.Filter, logicalOp query.Logica
 			clauses = append(clauses, fmt.Sprintf("%s ILIKE $%d", col, *argIdx))
 			args = append(args, f.Value)
 			*argIdx++
+		case query.OpNotLike:
+			clauses = append(clauses, fmt.Sprintf("%s NOT ILIKE $%d", col, *argIdx))
+			args = append(args, f.Value)
+			*argIdx++
 		case query.OpIsNull:
 			clauses = append(clauses, fmt.Sprintf("%s IS NULL", col))
 		case query.OpIsNotNull:
@@ -162,6 +166,14 @@ func (b *QueryBuilder) buildWhere(filters []query.Filter, logicalOp query.Logica
 			clauses = append(clauses, fmt.Sprintf("%s = ANY($%d)", col, *argIdx))
 			args = append(args, f.Value)
 			*argIdx++
+		case query.OpNin:
+			clauses = append(clauses, fmt.Sprintf("NOT (%s = ANY($%d))", col, *argIdx))
+			args = append(args, f.Value)
+			*argIdx++
+		case query.OpBetween:
+			clauses = append(clauses, fmt.Sprintf("%s BETWEEN $%d AND $%d", col, *argIdx, *argIdx+1))
+			args = append(args, f.Value, f.ValueTo)
+			*argIdx += 2
 		}
 	}
 
