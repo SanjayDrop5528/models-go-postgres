@@ -24,6 +24,7 @@ import (
 // PostgresAdapter implements the core Adapter interface for PostgreSQL.
 type PostgresAdapter struct {
 	dsn          string
+	schemas      []string
 	db           *sql.DB
 	ddlGen       *DDLGenerator
 	queryBuilder *QueryBuilder
@@ -40,6 +41,12 @@ func NewPostgresAdapter(dsn string) *PostgresAdapter {
 		queryBuilder: &QueryBuilder{},
 		mockStore:    make(map[string][]map[string]any),
 	}
+}
+
+// WithSchemas configures specific PostgreSQL database schemas for introspection and operations.
+func (a *PostgresAdapter) WithSchemas(schemas ...string) *PostgresAdapter {
+	a.schemas = schemas
+	return a
 }
 
 func (a *PostgresAdapter) Name() string {
@@ -259,29 +266,40 @@ func (a *PostgresAdapter) ImportLiveMetadata(ctx context.Context) ([]*model.Mode
 	}
 
 	introspector := NewIntrospector(db)
-	tables, err := introspector.ListTables(ctx)
+	tables, err := introspector.ListTables(ctx, a.schemas...)
 	if err != nil {
 		log.Printf("[PostgreSQL] ✖ [Import Error] Failed querying information_schema.tables: %v", err)
 		return nil, nil, fmt.Errorf("failed listing postgres tables: %w", err)
 	}
 
-	log.Printf("[PostgreSQL] [Import Introspection] Discovered %d live database table(s) in schema 'public' (Database: '%s').", len(tables), a.GetDatabaseName())
+	targetSchemas := "all user schemas"
+	if len(a.schemas) > 0 {
+		targetSchemas = fmt.Sprintf("schema(s) '%s'", strings.Join(a.schemas, "', '"))
+	}
+	log.Printf("[PostgreSQL] [Import Introspection] Discovered %d live database table(s) across %s (Database: '%s').", len(tables), targetSchemas, a.GetDatabaseName())
 
 	var configs []*model.ModelConfig
 	var fields []*model.DataModel
 
-	for _, tableName := range tables {
+	for _, item := range tables {
+		tableName := item.Name
+		schemaName := item.Schema
+
 		if tableName == "model_configs" || tableName == "data_models" || tableName == "schema_migrations" || tableName == "alembic_version" || tableName == "flyway_schema_history" {
 			continue
 		}
 
-		schemaObj, err := introspector.IntrospectTable(ctx, tableName)
+		schemaObj, err := introspector.IntrospectTableInSchema(ctx, schemaName, tableName)
 		if err != nil || schemaObj == nil {
-			log.Printf("[PostgreSQL] ⚠ [Import Warning] Could not introspect table '%s': %v (skipping)", tableName, err)
+			log.Printf("[PostgreSQL] ⚠ [Import Warning] Could not introspect table '%s.%s': %v (skipping)", schemaName, tableName, err)
 			continue
 		}
 
 		modelID := tableName
+		if schemaName != "public" {
+			modelID = fmt.Sprintf("%s_%s", schemaName, tableName)
+		}
+
 		modelName := tableName
 		if strings.Contains(tableName, "_") {
 			parts := strings.Split(tableName, "_")
@@ -292,15 +310,18 @@ func (a *PostgresAdapter) ImportLiveMetadata(ctx context.Context) ([]*model.Mode
 		} else {
 			modelName = strings.Title(tableName)
 		}
+		if schemaName != "public" {
+			modelName = strings.Title(schemaName) + modelName
+		}
 
 		cfg := &model.ModelConfig{
 			ID:                   modelID,
 			Name:                 modelName,
 			Table:                tableName,
 			RefName:              tableName,
-			Schema:               "public",
+			Schema:               schemaName,
 			IsAttributeReference: false,
-			Description:          fmt.Sprintf("Auto-imported from PostgreSQL live table '%s'", tableName),
+			Description:          fmt.Sprintf("Auto-imported from PostgreSQL live table '%s.%s'", schemaName, tableName),
 			Status:               model.ModelConfigStatusActive,
 			Version:              1,
 			CreatedAt:            time.Now(),

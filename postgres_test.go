@@ -112,3 +112,10 @@ func TestPostgres_DDL_CreateTable(t *testing.T) {
 		t.Fatalf("expected PRIMARY KEY constraint, got: %s", stmt)
 	}
 }
+
+func TestPostgres_WithSchemas(t *testing.T) {
+	adapter := postgres.NewPostgresAdapter("postgres://postgres:postgres@localhost:5432/testdb").WithSchemas("tenant_a", "sales")
+	if adapter.Name() != "postgres" {
+		t.Fatalf("expected adapter name postgres, got: %s", adapter.Name())
+	}
+}

@@ -9,6 +9,12 @@ import (
 	"strings"
 )
 
+// TableItem represents a table discovered in a database schema.
+type TableItem struct {
+	Schema string `json:"schema"`
+	Name   string `json:"name"`
+}
+
 // Introspector queries PostgreSQL catalogs to construct a normalized core Schema.
 type Introspector struct {
 	db *sql.DB
@@ -23,48 +29,86 @@ func (i *Introspector) DB() *sql.DB {
 	return i.db
 }
 
-// ListTables queries PostgreSQL catalogs for all user base tables in the public schema.
-func (i *Introspector) ListTables(ctx context.Context) ([]string, error) {
+// ListTables queries PostgreSQL catalogs for user base tables across target schemas.
+// If schemas is empty, it queries all user-defined schemas (excluding pg_catalog, information_schema, pg_toast).
+func (i *Introspector) ListTables(ctx context.Context, schemas ...string) ([]TableItem, error) {
 	if i.db == nil {
 		return nil, nil
 	}
-	query := `
-		SELECT table_name
-		FROM information_schema.tables
-		WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-		ORDER BY table_name;
-	`
-	rows, err := i.db.QueryContext(ctx, query)
+
+	var query string
+	var args []any
+
+	if len(schemas) == 0 {
+		query = `
+			SELECT table_schema, table_name
+			FROM information_schema.tables
+			WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+			  AND table_type = 'BASE TABLE'
+			ORDER BY table_schema, table_name;
+		`
+	} else {
+		placeholders := make([]string, len(schemas))
+		for idx, s := range schemas {
+			placeholders[idx] = fmt.Sprintf("$%d", idx+1)
+			args = append(args, s)
+		}
+		query = fmt.Sprintf(`
+			SELECT table_schema, table_name
+			FROM information_schema.tables
+			WHERE table_schema IN (%s)
+			  AND table_type = 'BASE TABLE'
+			ORDER BY table_schema, table_name;
+		`, strings.Join(placeholders, ", "))
+	}
+
+	rows, err := i.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed listing tables from information_schema: %w", err)
 	}
 	defer rows.Close()
 
-	var tables []string
+	var tables []TableItem
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err == nil {
-			tables = append(tables, name)
+		var item TableItem
+		if err := rows.Scan(&item.Schema, &item.Name); err == nil {
+			tables = append(tables, item)
 		}
 	}
 	return tables, nil
 }
 
 // IntrospectTable inspects columns, primary keys, and indexes for a specific PostgreSQL table.
+// If tableName contains "schema.table", it splits it automatically. Defaults schema to "public" if omitted.
 func (i *Introspector) IntrospectTable(ctx context.Context, tableName string) (*schema.Schema, error) {
+	schemaName := "public"
+	tableOnly := tableName
+	if strings.Contains(tableName, ".") {
+		parts := strings.SplitN(tableName, ".", 2)
+		schemaName = parts[0]
+		tableOnly = parts[1]
+	}
+	return i.IntrospectTableInSchema(ctx, schemaName, tableOnly)
+}
+
+// IntrospectTableInSchema inspects columns, primary keys, and indexes for a specific schema and table.
+func (i *Introspector) IntrospectTableInSchema(ctx context.Context, schemaName, tableName string) (*schema.Schema, error) {
 	if i.db == nil {
 		return nil, nil
+	}
+	if schemaName == "" {
+		schemaName = "public"
 	}
 
 	// 1. Fetch Columns
 	colQuery := `
 		SELECT column_name, data_type, character_maximum_length, numeric_precision, numeric_scale, is_nullable, column_default
 		FROM information_schema.columns
-		WHERE table_schema = 'public' AND table_name = $1;
+		WHERE table_schema = $1 AND table_name = $2;
 	`
-	rows, err := i.db.QueryContext(ctx, colQuery, tableName)
+	rows, err := i.db.QueryContext(ctx, colQuery, schemaName, tableName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query columns: %w", err)
+		return nil, fmt.Errorf("failed to query columns for '%s.%s': %w", schemaName, tableName, err)
 	}
 	defer rows.Close()
 
@@ -90,7 +134,7 @@ func (i *Introspector) IntrospectTable(ctx context.Context, tableName string) (*
 		)
 
 		if err := rows.Scan(&colName, &dataType, &maxLen, &numPrec, &numScale, &isNullable, &colDefault); err != nil {
-			return nil, fmt.Errorf("failed to scan column info: %w", err)
+			return nil, fmt.Errorf("failed to scan column info for '%s.%s': %w", schemaName, tableName, err)
 		}
 
 		attr := schema.SchemaAttribute{
@@ -129,9 +173,9 @@ func (i *Introspector) IntrospectTable(ctx context.Context, tableName string) (*
 		FROM information_schema.table_constraints tc
 		JOIN information_schema.key_column_usage kcu
 		  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-		WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = 'public' AND tc.table_name = $1;
+		WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = $1 AND tc.table_name = $2;
 	`
-	pkRows, err := i.db.QueryContext(ctx, pkQuery, tableName)
+	pkRows, err := i.db.QueryContext(ctx, pkQuery, schemaName, tableName)
 	if err == nil {
 		defer pkRows.Close()
 		var pkCols []string
@@ -166,9 +210,9 @@ func (i *Introspector) IntrospectTable(ctx context.Context, tableName string) (*
 		  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
 		JOIN information_schema.constraint_column_usage AS ccu
 		  ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
-		WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public' AND tc.table_name = $1;
+		WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = $1 AND tc.table_name = $2;
 	`
-	fkRows, err := i.db.QueryContext(ctx, fkQuery, tableName)
+	fkRows, err := i.db.QueryContext(ctx, fkQuery, schemaName, tableName)
 	if err == nil {
 		defer fkRows.Close()
 		for fkRows.Next() {

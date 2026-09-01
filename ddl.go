@@ -221,6 +221,10 @@ func (g *DDLGenerator) buildColumnDef(attr schema.SchemaAttribute) string {
 }
 
 func quoteIdent(name string) string {
+	if strings.Contains(name, ".") {
+		parts := strings.SplitN(name, ".", 2)
+		return fmt.Sprintf("\"%s\".\"%s\"", strings.ReplaceAll(parts[0], "\"", "\"\""), strings.ReplaceAll(parts[1], "\"", "\"\""))
+	}
 	return fmt.Sprintf("\"%s\"", strings.ReplaceAll(name, "\"", "\"\""))
 }
 
