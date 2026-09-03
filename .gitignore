@@ -1,0 +1,27 @@
+# System files
+.DS_Store
+.DB_STORE
+Thumbs.db
+
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
