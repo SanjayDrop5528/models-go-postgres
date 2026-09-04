@@ -301,17 +301,8 @@ func (a *PostgresAdapter) ImportLiveMetadata(ctx context.Context) ([]*model.Mode
 		}
 
 		modelName := tableName
-		if strings.Contains(tableName, "_") {
-			parts := strings.Split(tableName, "_")
-			for i, p := range parts {
-				parts[i] = strings.Title(p)
-			}
-			modelName = strings.Join(parts, "")
-		} else {
-			modelName = strings.Title(tableName)
-		}
-		if schemaName != "public" {
-			modelName = strings.Title(schemaName) + modelName
+		if schemaName != "" {
+			modelName = fmt.Sprintf("%s.%s", schemaName, tableName)
 		}
 
 		cfg := &model.ModelConfig{
