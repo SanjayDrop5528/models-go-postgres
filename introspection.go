@@ -4,9 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
+
 	"github.com/SanjayDrop5528/models-go-engine/model"
 	"github.com/SanjayDrop5528/models-go-engine/schema"
-	"strings"
 )
 
 // TableItem represents a table discovered in a database schema.
@@ -97,7 +98,6 @@ func (i *Introspector) ListTables(ctx context.Context, schemas ...string) ([]Tab
 		`, strings.Join(placeholders, ", "))
 	}
 
-
 	rows, err := i.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed listing tables from information_schema: %w", err)
@@ -115,7 +115,7 @@ func (i *Introspector) ListTables(ctx context.Context, schemas ...string) ([]Tab
 }
 
 // IntrospectTable inspects columns, primary keys, and indexes for a specific PostgreSQL table.
-// If tableName contains "schema.table", it splits it automatically. Defaults schema to "public" if omitted.
+// If tableName contains "schema.table", it splits it automatically. If omitted, attempts lookup across user schemas.
 func (i *Introspector) IntrospectTable(ctx context.Context, tableName string) (*schema.Schema, error) {
 	schemaName := "public"
 	tableOnly := tableName
@@ -123,7 +123,29 @@ func (i *Introspector) IntrospectTable(ctx context.Context, tableName string) (*
 		parts := strings.SplitN(tableName, ".", 2)
 		schemaName = parts[0]
 		tableOnly = parts[1]
+		return i.IntrospectTableInSchema(ctx, schemaName, tableOnly)
 	}
+
+	// Try public schema first
+	sc, err := i.IntrospectTableInSchema(ctx, "public", tableOnly)
+	if err == nil && sc != nil && len(sc.Attributes) > 0 {
+		return sc, nil
+	}
+
+	// Auto-lookup schema for table if not found in public
+	if i.db != nil {
+		var foundSchema string
+		lookupErr := i.db.QueryRowContext(ctx, `
+			SELECT table_schema 
+			FROM information_schema.tables 
+			WHERE table_name = $1 AND table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast') 
+			LIMIT 1;
+		`, tableOnly).Scan(&foundSchema)
+		if lookupErr == nil && foundSchema != "" {
+			return i.IntrospectTableInSchema(ctx, foundSchema, tableOnly)
+		}
+	}
+
 	return i.IntrospectTableInSchema(ctx, schemaName, tableOnly)
 }
 
@@ -148,8 +170,13 @@ func (i *Introspector) IntrospectTableInSchema(ctx context.Context, schemaName, 
 	}
 	defer rows.Close()
 
+	fullName := tableName
+	if schemaName != "" {
+		fullName = fmt.Sprintf("%s.%s", schemaName, tableName)
+	}
+
 	s := &schema.Schema{
-		Name:        tableName,
+		Name:        fullName,
 		StorageType: model.StorageRelational,
 		Attributes:  make([]schema.SchemaAttribute, 0),
 		Indexes:     make([]schema.SchemaIndex, 0),

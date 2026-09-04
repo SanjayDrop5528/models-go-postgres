@@ -301,8 +301,8 @@ func (a *PostgresAdapter) ImportLiveMetadata(ctx context.Context) ([]*model.Mode
 		}
 
 		modelName := tableName
-		if schemaName != "" {
-			modelName = fmt.Sprintf("%s.%s", schemaName, tableName)
+		if schemaName != "" && schemaName != "public" {
+			modelName = fmt.Sprintf("%s_%s", schemaName, tableName)
 		}
 
 		cfg := &model.ModelConfig{
