@@ -29,17 +29,52 @@ func (i *Introspector) DB() *sql.DB {
 	return i.db
 }
 
+// ListSchemas queries PostgreSQL catalogs for all user-defined schemas.
+func (i *Introspector) ListSchemas(ctx context.Context) ([]string, error) {
+	if i.db == nil {
+		return nil, nil
+	}
+	query := `
+		SELECT schema_name
+		FROM information_schema.schemata
+		WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+		ORDER BY schema_name;
+	`
+	rows, err := i.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed listing schemas: %w", err)
+	}
+	defer rows.Close()
+
+	var schemas []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err == nil {
+			schemas = append(schemas, s)
+		}
+	}
+	return schemas, nil
+}
+
 // ListTables queries PostgreSQL catalogs for user base tables across target schemas.
-// If schemas is empty, it queries all user-defined schemas (excluding pg_catalog, information_schema, pg_toast).
+// If schemas is empty or contains "ALL" / "*", it queries all user-defined schemas (excluding pg_catalog, information_schema, pg_toast).
 func (i *Introspector) ListTables(ctx context.Context, schemas ...string) ([]TableItem, error) {
 	if i.db == nil {
 		return nil, nil
 	}
 
+	var targetSchemas []string
+	for _, s := range schemas {
+		sClean := strings.TrimSpace(s)
+		if sClean != "" && !strings.EqualFold(sClean, "ALL") && sClean != "*" {
+			targetSchemas = append(targetSchemas, sClean)
+		}
+	}
+
 	var query string
 	var args []any
 
-	if len(schemas) == 0 {
+	if len(targetSchemas) == 0 {
 		query = `
 			SELECT table_schema, table_name
 			FROM information_schema.tables
@@ -48,8 +83,8 @@ func (i *Introspector) ListTables(ctx context.Context, schemas ...string) ([]Tab
 			ORDER BY table_schema, table_name;
 		`
 	} else {
-		placeholders := make([]string, len(schemas))
-		for idx, s := range schemas {
+		placeholders := make([]string, len(targetSchemas))
+		for idx, s := range targetSchemas {
 			placeholders[idx] = fmt.Sprintf("$%d", idx+1)
 			args = append(args, s)
 		}
@@ -61,6 +96,7 @@ func (i *Introspector) ListTables(ctx context.Context, schemas ...string) ([]Tab
 			ORDER BY table_schema, table_name;
 		`, strings.Join(placeholders, ", "))
 	}
+
 
 	rows, err := i.db.QueryContext(ctx, query, args...)
 	if err != nil {
