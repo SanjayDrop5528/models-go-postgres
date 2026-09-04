@@ -741,7 +741,58 @@ func (a *PostgresAdapter) Execute(ctx context.Context, req execution.ExecutionRe
 			},
 		}, nil
 
-	case operation.OpCommand, operation.OpCustom:
+	case operation.OpQuery:
+		if a.db != nil {
+			queryStr := strings.TrimSpace(req.Target)
+			rows, err := a.db.QueryContext(ctx, queryStr)
+			if err != nil {
+				return nil, fmt.Errorf("failed to execute preview query: %w", err)
+			}
+			defer rows.Close()
+
+			cols, err := rows.Columns()
+			if err != nil {
+				return nil, err
+			}
+
+			var resultRows []map[string]any
+			for rows.Next() {
+				scanArgs := make([]any, len(cols))
+				values := make([]any, len(cols))
+				for i := range scanArgs {
+					scanArgs[i] = &values[i]
+				}
+
+				if err := rows.Scan(scanArgs...); err != nil {
+					return nil, err
+				}
+
+				rowMap := make(map[string]any)
+				for i, col := range cols {
+					val := values[i]
+					if b, ok := val.([]byte); ok {
+						rowMap[col] = string(b)
+					} else {
+						rowMap[col] = val
+					}
+				}
+				resultRows = append(resultRows, rowMap)
+			}
+
+			return &execution.ExecutionResult{
+				Data:   resultRows,
+				Status: "SUCCESS",
+				Metadata: map[string]any{
+					"count": len(resultRows),
+				},
+			}, nil
+		}
+		return &execution.ExecutionResult{
+			Data:   []map[string]any{},
+			Status: "SUCCESS",
+		}, nil
+
+	case operation.OpDDL, operation.OpCommand, operation.OpCustom:
 		if a.db != nil {
 			res, err := a.db.ExecContext(ctx, req.Target)
 			if err != nil {
