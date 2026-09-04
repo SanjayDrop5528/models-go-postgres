@@ -123,7 +123,15 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 			onCondition += " AND " + strings.Join(filterParts, " AND ")
 		}
 
-		joinClauses = append(joinClauses, fmt.Sprintf("%s \"%s\" AS \"%s\" ON %s", jType, j.ToTable, j.Alias, onCondition))
+		targetTbl := fmt.Sprintf("\"%s\"", j.ToTable)
+		if j.Schema != "" && j.Schema != "public" {
+			targetTbl = fmt.Sprintf("\"%s\".\"%s\"", j.Schema, j.ToTable)
+		} else if strings.Contains(j.ToTable, ".") {
+			parts := strings.SplitN(j.ToTable, ".", 2)
+			targetTbl = fmt.Sprintf("\"%s\".\"%s\"", parts[0], parts[1])
+		}
+
+		joinClauses = append(joinClauses, fmt.Sprintf("%s %s AS \"%s\" ON %s", jType, targetTbl, j.Alias, onCondition))
 	}
 
 	// 5. WHERE Clauses
