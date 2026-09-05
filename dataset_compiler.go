@@ -33,8 +33,11 @@ func (c *PostgresDataSetCompiler) Compile(ctx context.Context, ast *planner.Quer
 	execQuery := c.buildSelectSQL(ast, false, false)
 	refQuery := c.buildSelectSQL(ast, true, false)
 	routineQuery := c.buildSelectSQL(ast, false, true)
-
-	ddl := c.buildDDL(ds.ReferenceName, routineQuery, ast.Parameters, saveMode)
+	baseSchema := ds.BaseCollection.Schema
+	if baseSchema == "" {
+		baseSchema = "metadata_catalog"
+	}
+	ddl := c.buildDDL(ds.ReferenceName, baseSchema, routineQuery, ast.Parameters, saveMode)
 
 	return &compiler.CompiledPipeline{
 		ExecutableQuery:   execQuery,
@@ -197,9 +200,12 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 	return sql + ";"
 }
 
-func (c *PostgresDataSetCompiler) buildDDL(procName, querySQL string, params []domain.FilterParam, mode domain.SaveMode) string {
+func (c *PostgresDataSetCompiler) buildDDL(procName, baseSchema, querySQL string, params []domain.FilterParam, mode domain.SaveMode) string {
 	if mode == domain.SaveModeQuery {
 		return ""
+	}
+	if baseSchema == "" {
+		baseSchema = "metadata_catalog"
 	}
 
 	cleanName := strings.ReplaceAll(procName, "-", "_")
@@ -227,7 +233,8 @@ func (c *PostgresDataSetCompiler) buildDDL(procName, querySQL string, params []d
 	}
 
 	if mode == domain.SaveModeFunction {
-		return fmt.Sprintf(`CREATE OR REPLACE FUNCTION fn_%s(%s)
+		return fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s;
+CREATE OR REPLACE FUNCTION %s.fn_%s(%s)
 RETURNS TABLE (result_json jsonb)
 LANGUAGE plpgsql
 AS $$
@@ -235,17 +242,18 @@ BEGIN
     RETURN QUERY
     SELECT to_jsonb(t) FROM (%s) t;
 END;
-$$;`, cleanName, strings.Join(paramDefs, ", "), strings.TrimSuffix(querySQL, ";"))
+$$;`, baseSchema, baseSchema, cleanName, strings.Join(paramDefs, ", "), strings.TrimSuffix(querySQL, ";"))
 	}
 
-	return fmt.Sprintf(`CREATE OR REPLACE PROCEDURE sp_%s(%s)
+	return fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s;
+CREATE OR REPLACE PROCEDURE %s.sp_%s(%s)
 LANGUAGE plpgsql
 AS $$
 BEGIN
     -- Executable query for dataset '%s'
     %s
 END;
-$$;`, cleanName, strings.Join(paramDefs, ", "), procName, querySQL)
+$$;`, baseSchema, baseSchema, cleanName, strings.Join(paramDefs, ", "), procName, querySQL)
 }
 
 // CompileDataSet compiles QueryAST into PostgreSQL SQL.

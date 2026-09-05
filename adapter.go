@@ -177,8 +177,13 @@ func (a *PostgresAdapter) EnsureMetadataTables(ctx context.Context) error {
 }
 
 func (a *PostgresAdapter) ensureMetadataTablesInternal(ctx context.Context, db *sql.DB) error {
+	createSchema := `CREATE SCHEMA IF NOT EXISTS metadata_catalog;`
+	if _, err := db.ExecContext(ctx, createSchema); err != nil {
+		return fmt.Errorf("failed to create 'metadata_catalog' schema: %w", err)
+	}
+
 	createCfgTable := `
-	CREATE TABLE IF NOT EXISTS model_configs (
+	CREATE TABLE IF NOT EXISTS metadata_catalog.model_configs (
 		id VARCHAR(255) PRIMARY KEY,
 		schema VARCHAR(255),
 		name VARCHAR(255) NOT NULL,
@@ -197,7 +202,7 @@ func (a *PostgresAdapter) ensureMetadataTablesInternal(ctx context.Context, db *
 	);`
 
 	createDMTable := `
-	CREATE TABLE IF NOT EXISTS data_models (
+	CREATE TABLE IF NOT EXISTS metadata_catalog.data_models (
 		id VARCHAR(255) PRIMARY KEY,
 		model_id VARCHAR(255) NOT NULL,
 		column_name VARCHAR(255),
@@ -236,14 +241,40 @@ func (a *PostgresAdapter) ensureMetadataTablesInternal(ctx context.Context, db *
 		updated_by VARCHAR(255)
 	);`
 
+	createDSTable := `
+	CREATE TABLE IF NOT EXISTS metadata_catalog.dataset (
+		id VARCHAR(100) PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		reference_name VARCHAR(100) NOT NULL UNIQUE,
+		driver VARCHAR(50) NOT NULL DEFAULT 'postgres',
+		base_collection JSONB NOT NULL,
+		join_collections JSONB DEFAULT '[]'::jsonb,
+		custom_columns JSONB DEFAULT '[]'::jsonb,
+		group_by_fields JSONB DEFAULT '[]'::jsonb,
+		schematic_table JSONB DEFAULT '[]'::jsonb,
+		filter JSONB DEFAULT '{}'::jsonb,
+		filter_params JSONB DEFAULT '[]'::jsonb,
+		selected_list JSONB DEFAULT '[]'::jsonb,
+		save_mode VARCHAR(50) DEFAULT 'PROCEDURE',
+		pipeline TEXT,
+		reference_pipeline TEXT,
+		status VARCHAR(20) DEFAULT 'ACTIVE',
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_dataset_reference_name ON metadata_catalog.dataset(reference_name);`
+
 	if _, err := db.ExecContext(ctx, createCfgTable); err != nil {
-		return fmt.Errorf("failed to create 'model_configs' table: %w", err)
+		return fmt.Errorf("failed to create 'metadata_catalog.model_configs' table: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, createDMTable); err != nil {
-		return fmt.Errorf("failed to create 'data_models' table: %w", err)
+		return fmt.Errorf("failed to create 'metadata_catalog.data_models' table: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, createDSTable); err != nil {
+		return fmt.Errorf("failed to create 'metadata_catalog.dataset' table: %w", err)
 	}
 
-	log.Printf("[PostgreSQL] ✔ System metadata tables ('model_configs' and 'data_models') verified & active.")
+	log.Printf("[PostgreSQL] ✔ System metadata catalog tables ('metadata_catalog.model_configs', 'metadata_catalog.data_models', 'metadata_catalog.dataset') verified & active.")
 	return nil
 }
 
@@ -285,7 +316,7 @@ func (a *PostgresAdapter) ImportLiveMetadata(ctx context.Context) ([]*model.Mode
 		tableName := item.Name
 		schemaName := item.Schema
 
-		if tableName == "model_configs" || tableName == "data_models" || tableName == "schema_migrations" || tableName == "alembic_version" || tableName == "flyway_schema_history" {
+		if schemaName == "metadata_catalog" || tableName == "model_configs" || tableName == "data_models" || tableName == "dataset" || tableName == "schema_migrations" || tableName == "alembic_version" || tableName == "flyway_schema_history" {
 			continue
 		}
 
@@ -504,9 +535,20 @@ func (a *PostgresAdapter) ApplySchemaChange(ctx context.Context, p *plan.SchemaP
 	return tx.Commit()
 }
 
+func (a *PostgresAdapter) resolveTableName(ref model.ModelRef) string {
+	tableName := ref.StorageName
+	if tableName == "" {
+		tableName = ref.Name
+	}
+	if tableName == "model_configs" || tableName == "data_models" || tableName == "dataset" {
+		return "metadata_catalog." + tableName
+	}
+	return tableName
+}
+
 // Create inserts a row using parameterized SQL.
 func (a *PostgresAdapter) Create(ctx context.Context, ref model.ModelRef, data map[string]any) (map[string]any, error) {
-	tableName := ref.StorageName
+	tableName := a.resolveTableName(ref)
 	res := make(map[string]any)
 	for k, v := range data {
 		res[k] = v
@@ -529,7 +571,7 @@ func (a *PostgresAdapter) Create(ctx context.Context, ref model.ModelRef, data m
 
 // Find queries PostgreSQL.
 func (a *PostgresAdapter) Find(ctx context.Context, ref model.ModelRef, q query.Query) ([]map[string]any, int64, error) {
-	tableName := ref.StorageName
+	tableName := a.resolveTableName(ref)
 	db, _ := a.getDB(ctx)
 	if db == nil {
 		a.mu.RLock()
@@ -581,7 +623,7 @@ func (a *PostgresAdapter) Find(ctx context.Context, ref model.ModelRef, q query.
 
 // FindOne finds a record by ID.
 func (a *PostgresAdapter) FindOne(ctx context.Context, ref model.ModelRef, id any) (map[string]any, error) {
-	tableName := ref.StorageName
+	tableName := a.resolveTableName(ref)
 	idStr := fmt.Sprintf("%v", id)
 
 	db, _ := a.getDB(ctx)
@@ -613,7 +655,7 @@ func (a *PostgresAdapter) FindOne(ctx context.Context, ref model.ModelRef, id an
 
 // Update updates a record by ID.
 func (a *PostgresAdapter) Update(ctx context.Context, ref model.ModelRef, id any, data map[string]any) (map[string]any, error) {
-	tableName := ref.StorageName
+	tableName := a.resolveTableName(ref)
 	idStr := fmt.Sprintf("%v", id)
 
 	db, _ := a.getDB(ctx)
@@ -639,7 +681,7 @@ func (a *PostgresAdapter) Update(ctx context.Context, ref model.ModelRef, id any
 
 // Patch updates specific fields by ID.
 func (a *PostgresAdapter) Patch(ctx context.Context, ref model.ModelRef, id any, data map[string]any) (map[string]any, error) {
-	tableName := ref.StorageName
+	tableName := a.resolveTableName(ref)
 	idStr := fmt.Sprintf("%v", id)
 
 	db, _ := a.getDB(ctx)
@@ -662,7 +704,7 @@ func (a *PostgresAdapter) Patch(ctx context.Context, ref model.ModelRef, id any,
 
 // Delete removes a record by ID.
 func (a *PostgresAdapter) Delete(ctx context.Context, ref model.ModelRef, id any) error {
-	tableName := ref.StorageName
+	tableName := a.resolveTableName(ref)
 	idStr := fmt.Sprintf("%v", id)
 
 	db, _ := a.getDB(ctx)
