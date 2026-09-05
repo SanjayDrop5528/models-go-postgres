@@ -68,13 +68,30 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 			expr = cc.Function.PostgresExpression
 			for i, op := range cc.Operands {
 				ph := fmt.Sprintf("{{%d}}", i)
-				opSql := fmt.Sprintf("\"%s\".\"%s\"", op.SourceTable, op.SourceField)
+				var opSql string
+				if op.SourceTable == "" || op.SourceTable == "_LITERAL_" {
+					if op.IsLiteral {
+						opSql = op.SourceField
+					} else {
+						opSql = fmt.Sprintf("\"%s\"", op.SourceField)
+					}
+				} else {
+					opSql = fmt.Sprintf("\"%s\".\"%s\"", op.SourceTable, op.SourceField)
+				}
 				expr = strings.ReplaceAll(expr, ph, opSql)
 			}
 			// Handle {{args}}
 			var allArgs []string
 			for _, op := range cc.Operands {
-				allArgs = append(allArgs, fmt.Sprintf("\"%s\".\"%s\"", op.SourceTable, op.SourceField))
+				if op.SourceTable == "" || op.SourceTable == "_LITERAL_" {
+					if op.IsLiteral {
+						allArgs = append(allArgs, op.SourceField)
+					} else {
+						allArgs = append(allArgs, fmt.Sprintf("\"%s\"", op.SourceField))
+					}
+				} else {
+					allArgs = append(allArgs, fmt.Sprintf("\"%s\".\"%s\"", op.SourceTable, op.SourceField))
+				}
 			}
 			expr = strings.ReplaceAll(expr, "{{args}}", strings.Join(allArgs, ", "))
 		}
