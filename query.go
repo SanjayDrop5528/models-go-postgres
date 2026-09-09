@@ -25,8 +25,8 @@ func (b *QueryBuilder) BuildSelect(table string, q query.Query) (string, []any) 
 
 	sql := fmt.Sprintf("SELECT %s FROM %s", cols, quoteIdent(table))
 
-	if len(q.Filters) > 0 {
-		whereClause, whereArgs := b.buildWhere(q.Filters, q.LogicalOp, &argIdx)
+	if len(q.Filters) > 0 || len(q.RawWheres) > 0 || len(q.WhereGroups) > 0 {
+		whereClause, whereArgs := b.buildWhere(q, &argIdx)
 		sql += " WHERE " + whereClause
 		args = append(args, whereArgs...)
 	}
@@ -109,16 +109,16 @@ func (b *QueryBuilder) BuildDelete(table string, id any) (string, []any) {
 	return sql, []any{id}
 }
 
-func (b *QueryBuilder) buildWhere(filters []query.Filter, logicalOp query.LogicalOp, argIdx *int) (string, []any) {
+func (b *QueryBuilder) buildWhere(q query.Query, argIdx *int) (string, []any) {
 	var clauses []string
 	var args []any
 
 	opJoin := " AND "
-	if logicalOp == query.OpOr {
+	if q.LogicalOp == query.OpOr {
 		opJoin = " OR "
 	}
 
-	for _, f := range filters {
+	for _, f := range q.Filters {
 		col := quoteIdent(f.Field)
 
 		switch f.Op {
@@ -174,6 +174,26 @@ func (b *QueryBuilder) buildWhere(filters []query.Filter, logicalOp query.Logica
 			clauses = append(clauses, fmt.Sprintf("%s BETWEEN $%d AND $%d", col, *argIdx, *argIdx+1))
 			args = append(args, f.Value, f.ValueTo)
 			*argIdx += 2
+		}
+	}
+
+	for _, rw := range q.RawWheres {
+		clause := rw.Query
+		for _, arg := range rw.Args {
+			if strings.Contains(clause, "?") {
+				clause = strings.Replace(clause, "?", fmt.Sprintf("$%d", *argIdx), 1)
+				*argIdx++
+			}
+			args = append(args, arg)
+		}
+		clauses = append(clauses, clause)
+	}
+
+	for _, wg := range q.WhereGroups {
+		subClause, subArgs := b.buildWhere(wg.Query, argIdx)
+		if subClause != "" {
+			clauses = append(clauses, fmt.Sprintf("(%s)", subClause))
+			args = append(args, subArgs...)
 		}
 	}
 
