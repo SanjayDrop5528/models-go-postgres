@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/SanjayDrop5528/models-go-engine/adapter"
@@ -165,7 +166,7 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 	var whereClauses []string
 	if len(ast.BaseTable.Filter) > 0 {
 		for k, v := range ast.BaseTable.Filter {
-			whereClauses = append(whereClauses, fmt.Sprintf("\"%s\".\"%s\" = '%v'", ast.BaseTable.Alias, k, v))
+			whereClauses = append(whereClauses, formatFilterCondition(ast.BaseTable.Alias, k, v))
 		}
 	}
 
@@ -291,4 +292,88 @@ func (w *genericCompilerWrapper) Compile(ctx context.Context, ast any, ds any) (
 	qAst, _ := ast.(*planner.QueryAST)
 	dSet, _ := ds.(*domain.DataSet)
 	return w.c.Compile(ctx, qAst, dSet)
+}
+
+func formatFilterCondition(table, col string, val any) string {
+	targetTable := table
+	targetCol := col
+	if idx := strings.Index(col, "."); idx >= 0 {
+		targetTable = col[:idx]
+		targetCol = col[idx+1:]
+	}
+
+	if m, ok := val.(map[string]any); ok {
+		var parts []string
+		for op, operand := range m {
+			switch op {
+			case "$gt":
+				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" > %s", targetTable, targetCol, formatSQLVal(operand)))
+			case "$gte":
+				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" >= %s", targetTable, targetCol, formatSQLVal(operand)))
+			case "$lt":
+				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" < %s", targetTable, targetCol, formatSQLVal(operand)))
+			case "$lte":
+				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" <= %s", targetTable, targetCol, formatSQLVal(operand)))
+			case "$ne":
+				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" <> %s", targetTable, targetCol, formatSQLVal(operand)))
+			case "$regex", "$like":
+				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" ILIKE '%%%v%%'", targetTable, targetCol, operand))
+			case "$in":
+				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" IN (%s)", targetTable, targetCol, formatSQLIn(operand)))
+			default:
+				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" = %s", targetTable, targetCol, formatSQLVal(operand)))
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, " AND ")
+		}
+	}
+	if val == nil {
+		return fmt.Sprintf("\"%s\".\"%s\" IS NULL", targetTable, targetCol)
+	}
+	return fmt.Sprintf("\"%s\".\"%s\" = %s", targetTable, targetCol, formatSQLVal(val))
+}
+
+func formatSQLVal(val any) string {
+	switch v := val.(type) {
+	case int, int32, int64, float32, float64:
+		return fmt.Sprintf("%v", v)
+	case bool:
+		return fmt.Sprintf("%t", v)
+	default:
+		s := strings.TrimSpace(fmt.Sprintf("%v", v))
+		if isNumericString(s) {
+			return s
+		}
+		// If it's a parameter placeholder (e.g. :employee_id or $1)
+		if strings.HasPrefix(s, ":") || strings.HasPrefix(s, "$") {
+			return s
+		}
+		// If it's a SQL date/time expression (e.g. NOW(), CURRENT_TIMESTAMP, CURRENT_DATE)
+		sUpper := strings.ToUpper(s)
+		if strings.HasPrefix(sUpper, "NOW()") || strings.HasPrefix(sUpper, "CURRENT_DATE") || strings.HasPrefix(sUpper, "CURRENT_TIMESTAMP") {
+			return s
+		}
+		return fmt.Sprintf("'%s'", strings.ReplaceAll(s, "'", "''"))
+	}
+}
+
+func formatSQLIn(val any) string {
+	if slice, ok := val.([]any); ok {
+		var formatted []string
+		for _, item := range slice {
+			formatted = append(formatted, formatSQLVal(item))
+		}
+		return strings.Join(formatted, ", ")
+	}
+	return formatSQLVal(val)
+}
+
+func isNumericString(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	_, err := strconv.ParseFloat(s, 64)
+	return err == nil
 }
