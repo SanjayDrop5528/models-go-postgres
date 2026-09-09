@@ -349,6 +349,10 @@ func formatSQLVal(val any) string {
 		if strings.HasPrefix(s, ":") || strings.HasPrefix(s, "$") {
 			return s
 		}
+		// If it's a dynamic relative date macro, e.g. C[-7d], C[-1d], C[0d], C[-30d], C[-1m]
+		if sqlExpr, ok := parseCustomDateMacro(s); ok {
+			return sqlExpr
+		}
 		// If it's a SQL date/time expression (e.g. NOW(), CURRENT_TIMESTAMP, CURRENT_DATE)
 		sUpper := strings.ToUpper(s)
 		if strings.HasPrefix(sUpper, "NOW()") || strings.HasPrefix(sUpper, "CURRENT_DATE") || strings.HasPrefix(sUpper, "CURRENT_TIMESTAMP") {
@@ -356,6 +360,55 @@ func formatSQLVal(val any) string {
 		}
 		return fmt.Sprintf("'%s'", strings.ReplaceAll(s, "'", "''"))
 	}
+}
+
+// parseCustomDateMacro translates custom relative date macros like C[-7d] into PostgreSQL interval expressions.
+func parseCustomDateMacro(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if (strings.HasPrefix(s, "C[") || strings.HasPrefix(s, "c[")) && strings.HasSuffix(s, "]") {
+		inner := strings.TrimSpace(s[2 : len(s)-1])
+		if inner == "" || strings.EqualFold(inner, "0d") || strings.EqualFold(inner, "today") {
+			return "CURRENT_DATE", true
+		}
+		if strings.EqualFold(inner, "now") {
+			return "NOW()", true
+		}
+
+		sign := "-"
+		offsetStr := inner
+		if strings.HasPrefix(inner, "+") {
+			sign = "+"
+			offsetStr = inner[1:]
+		} else if strings.HasPrefix(inner, "-") {
+			sign = "-"
+			offsetStr = inner[1:]
+		}
+
+		numEnd := 0
+		for numEnd < len(offsetStr) && (offsetStr[numEnd] >= '0' && offsetStr[numEnd] <= '9') {
+			numEnd++
+		}
+
+		if numEnd > 0 {
+			num := offsetStr[:numEnd]
+			unitRaw := strings.ToLower(strings.TrimSpace(offsetStr[numEnd:]))
+			unit := "days"
+			switch {
+			case unitRaw == "d" || strings.HasPrefix(unitRaw, "day"):
+				unit = "days"
+			case unitRaw == "m" || strings.HasPrefix(unitRaw, "month"):
+				unit = "months"
+			case unitRaw == "y" || strings.HasPrefix(unitRaw, "year"):
+				unit = "years"
+			case unitRaw == "h" || strings.HasPrefix(unitRaw, "hour"):
+				unit = "hours"
+			case unitRaw == "w" || strings.HasPrefix(unitRaw, "week"):
+				unit = "weeks"
+			}
+			return fmt.Sprintf("(CURRENT_DATE %s INTERVAL '%s %s')", sign, num, unit), true
+		}
+	}
+	return "", false
 }
 
 func formatSQLIn(val any) string {

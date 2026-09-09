@@ -1,12 +1,16 @@
 package postgres_test
 
 import (
-	"github.com/SanjayDrop5528/models-go-postgres"
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/SanjayDrop5528/models-go-engine/dataset/domain"
+	"github.com/SanjayDrop5528/models-go-engine/dataset/planner"
 	"github.com/SanjayDrop5528/models-go-engine/diff"
 	"github.com/SanjayDrop5528/models-go-engine/model"
 	"github.com/SanjayDrop5528/models-go-engine/schema"
-	"strings"
-	"testing"
+	"github.com/SanjayDrop5528/models-go-postgres"
 )
 
 func TestPostgres_DDL_AddColumn(t *testing.T) {
@@ -117,5 +121,33 @@ func TestPostgres_WithSchemas(t *testing.T) {
 	adapter := postgres.NewPostgresAdapter("postgres://postgres:postgres@localhost:5432/testdb").WithSchemas("tenant_a", "sales")
 	if adapter.Name() != "postgres" {
 		t.Fatalf("expected adapter name postgres, got: %s", adapter.Name())
+	}
+}
+
+func TestPostgres_DataSetCompiler_RelativeDateMacro(t *testing.T) {
+	c := postgres.NewPostgresDataSetCompiler()
+	ds := &domain.DataSet{
+		BaseCollection: domain.BaseCollection{
+			Collection: "attendance_logs",
+			Filter: map[string]any{
+				"created_on": map[string]any{
+					"$gte": "C[-7d]",
+				},
+				"action": "check_in",
+			},
+		},
+	}
+	astPlanner := planner.NewPlanner(nil)
+	ast, err := astPlanner.BuildAST(context.Background(), ds)
+	if err != nil {
+		t.Fatalf("unexpected plan error: %v", err)
+	}
+	res, err := c.Compile(context.Background(), ast, ds)
+	if err != nil {
+		t.Fatalf("unexpected compile error: %v", err)
+	}
+
+	if !strings.Contains(res.ExecutableQuery, `"attendance_logs"."created_on" >= (CURRENT_DATE - INTERVAL '7 days')`) {
+		t.Fatalf("expected compiled query to contain INTERVAL '7 days', got:\n%s", res.ExecutableQuery)
 	}
 }
