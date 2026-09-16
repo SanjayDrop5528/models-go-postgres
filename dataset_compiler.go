@@ -171,13 +171,18 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 				whereClauses = append(whereClauses, fmt.Sprintf("($%d IS NULL OR \"%s\".\"%s\" = $%d)", argIdx, cond.Table, cond.Column, argIdx))
 				argIdx++
 			} else {
-				// Replace param with default/literal string value
 				foundDefault := false
 				for _, p := range ast.Parameters {
-					if strings.EqualFold(p.ParamName, cond.ParamName) && p.DefaultValue != nil {
-						whereClauses = append(whereClauses, fmt.Sprintf("\"%s\".\"%s\" = '%v'", cond.Table, cond.Column, p.DefaultValue))
-						foundDefault = true
-						break
+					if strings.EqualFold(p.ParamName, cond.ParamName) {
+						val := p.Paramvalue
+						if val == nil || val == "" {
+							val = p.DefaultValue
+						}
+						if val != nil {
+							whereClauses = append(whereClauses, fmt.Sprintf("\"%s\".\"%s\" = '%v'", cond.Table, cond.Column, val))
+							foundDefault = true
+							break
+						}
 					}
 				}
 				if !foundDefault {
