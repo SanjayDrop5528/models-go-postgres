@@ -1,3 +1,12 @@
+// Package postgres provides the dataset compilation logic for PostgreSQL databases.
+//
+// Usage:
+// This file transforms an engine QueryAST and DataSet definition into dialect-specific PostgreSQL
+// SELECT queries, stored procedures, or user-defined table functions (SETOF RECORD). It supports:
+// 1. Projections, aliases, and table joins (INNER, LEFT, RIGHT, FULL OUTER).
+// 2. Custom column calculations (arithmetic, string operations, date intervals, conditionals).
+// 3. Aggregations (COUNT, SUM, AVG, MIN, MAX) with GROUP BY and HAVING clauses.
+// 4. Dynamic runtime parameter interpolation, relative date macros ("CD|+1|ED"), and stored DDL generation.
 package postgres
 
 import (
@@ -16,11 +25,32 @@ import (
 type PostgresDataSetCompiler struct{}
 
 // NewPostgresDataSetCompiler creates a new PostgreSQL dataset compiler instance.
+//
+// Purpose:
+// Instantiates a PostgresDataSetCompiler capable of translating an abstract QueryAST into PostgreSQL SQL.
+//
+// Where it is used:
+// Used in PostgresAdapter.CompileDataSet, PostgresAdapter.DataSetCompiler, and can be used directly
+// in test suites or engine service registrations.
+//
+// When can it be used:
+// Can be used during application initialization or adapter registration to provide PostgreSQL compilation support.
 func NewPostgresDataSetCompiler() *PostgresDataSetCompiler {
 	return &PostgresDataSetCompiler{}
 }
 
 // Compile compiles the QueryAST into PostgreSQL SQL and stored DDL.
+//
+// Purpose:
+// Compiles a database-agnostic QueryAST into an executable PostgreSQL SQL query, a reference parameterized pipeline,
+// and a routine DDL statement (procedure or function) depending on the dataset's SaveMode.
+//
+// Where it is used:
+// Invoked by DataSetService.Preview, DataSetService.Save, and PostgresAdapter.CompileDataSet.
+//
+// When can it be used:
+// Can be used whenever a DataSet definition has been validated and planned by the DataSetPlanner and needs to be executed
+// or persisted in a PostgreSQL database.
 func (c *PostgresDataSetCompiler) Compile(ctx context.Context, ast *planner.QueryAST, ds *domain.DataSet) (*compiler.CompiledPipeline, error) {
 	if ast == nil {
 		return nil, domain.NewError(domain.ErrPipelineCompilationFailed, "cannot compile nil AST")
@@ -50,6 +80,17 @@ func (c *PostgresDataSetCompiler) Compile(ctx context.Context, ast *planner.Quer
 	}, nil
 }
 
+// buildSelectSQL constructs the PostgreSQL SELECT statement.
+//
+// Purpose:
+// Builds the complete PostgreSQL SQL query string including SELECT projections, calculations, JOIN clauses,
+// ON filters, WHERE filters, GROUP BY groupings, and HAVING clauses.
+//
+// Where it is used:
+// Called internally by Compile to generate executable queries, parameter-templated pipelines, and routine bodies.
+//
+// When can it be used:
+// Can be used during compilation whenever a QueryAST must be serialized into a PostgreSQL SELECT statement.
 func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, parameterized, isRoutine bool) string {
 	var selectCols []string
 
@@ -378,11 +419,44 @@ func buildPostgresFunctionExpression(fnName string, operands []planner.ASTOperan
 			return ""
 		}
 		return fmt.Sprintf("(%s - (%s * (%s / 100.0)))", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+	case "DISCOUNT_AMOUNT":
+		if len(operands) >= 2 {
+			return fmt.Sprintf("(%s * (%s / 100.0))", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+		}
+		return first
+	case "DISCOUNTED_PRICE":
+		if len(operands) >= 2 {
+			return fmt.Sprintf("(%s - (%s * (%s / 100.0)))", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+		}
+		return first
+	case "MARGIN":
+		if len(operands) >= 2 {
+			return fmt.Sprintf("(((%s - %s) * 100.0) / NULLIF(%s, 0))", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]), formatPostgresOperand(operands[0]))
+		}
+		return first
+	case "GREATEST":
+		return fmt.Sprintf("GREATEST(%s)", strings.Join(formatPostgresOperands(operands), ", "))
+	case "LEAST":
+		return fmt.Sprintf("LEAST(%s)", strings.Join(formatPostgresOperands(operands), ", "))
+	case "IS_NULL":
+		return fmt.Sprintf("(%s IS NULL)", first)
+	case "IS_NOT_NULL":
+		return fmt.Sprintf("(%s IS NOT NULL)", first)
 	default:
 		return ""
 	}
 }
 
+// buildPostgresBinaryExpression builds a binary arithmetic expression for PostgreSQL.
+//
+// Purpose:
+// Wraps two operands and an operator in parentheses to form a valid SQL arithmetic expression.
+//
+// Where it is used:
+// Used in buildPostgresFunctionExpression for ADD, SUBTRACT, MULTIPLY, and DIVIDE operations.
+//
+// When can it be used:
+// Can be used whenever an infix binary operator must be compiled for two operands.
 func buildPostgresBinaryExpression(operands []planner.ASTOperand, op string) string {
 	if len(operands) < 2 {
 		return ""
@@ -390,6 +464,16 @@ func buildPostgresBinaryExpression(operands []planner.ASTOperand, op string) str
 	return fmt.Sprintf("(%s %s %s)", formatPostgresOperand(operands[0]), op, formatPostgresOperand(operands[1]))
 }
 
+// formatPostgresOperands formats a slice of ASTOperands into SQL operand strings.
+//
+// Purpose:
+// Converts multiple abstract operands into their PostgreSQL string representations.
+//
+// Where it is used:
+// Used in buildPostgresFunctionExpression when formatting argument lists for functions like CONCAT, GREATEST, LEAST, etc.
+//
+// When can it be used:
+// Can be used when a function takes a variadic list of operands.
 func formatPostgresOperands(operands []planner.ASTOperand) []string {
 	args := make([]string, 0, len(operands))
 	for _, op := range operands {
@@ -398,6 +482,16 @@ func formatPostgresOperands(operands []planner.ASTOperand) []string {
 	return args
 }
 
+// formatPostgresOperand formats a single ASTOperand into an escaped PostgreSQL SQL expression.
+//
+// Purpose:
+// Converts an operand into either a quoted column reference ("schema"."table"."col") or a properly typed SQL literal.
+//
+// Where it is used:
+// Used across all expression builders in PostgreSQL compilation.
+//
+// When can it be used:
+// Can be used whenever an operand (field reference, number, string, boolean) must be emitted into SQL.
 func formatPostgresOperand(op planner.ASTOperand) string {
 	if op.SourceTable == "" || op.SourceTable == "_LITERAL_" || op.SourceTable == "CALC" {
 		valStr := fmt.Sprintf("%v", op.LiteralVal)
@@ -415,6 +509,16 @@ func formatPostgresOperand(op planner.ASTOperand) string {
 	return fmt.Sprintf("\"%s\".\"%s\"", op.SourceTable, op.SourceField)
 }
 
+// buildDDL generates PostgreSQL routine statements for PROCEDURE or FUNCTION save modes.
+//
+// Purpose:
+// Generates CREATE OR REPLACE PROCEDURE or CREATE OR REPLACE FUNCTION DDL statements to persist dataset logic inside PostgreSQL.
+//
+// Where it is used:
+// Used in Compile when SaveMode is SaveModeProcedure or SaveModeFunction.
+//
+// When can it be used:
+// Can be used when saving a dataset definition that should be callable as a native stored routine.
 func (c *PostgresDataSetCompiler) buildDDL(procName, baseSchema, querySQL string, params []domain.FilterParam, mode domain.SaveMode) string {
 	if mode == domain.SaveModeQuery {
 		return ""
@@ -472,11 +576,29 @@ $$;`, baseSchema, baseSchema, cleanName, strings.Join(paramDefs, ", "), procName
 }
 
 // CompileDataSet compiles QueryAST into PostgreSQL SQL.
+//
+// Purpose:
+// Compiles a QueryAST and DataSet definition into a PostgreSQL-specific CompiledPipeline.
+//
+// Where it is used:
+// Invoked directly on PostgresAdapter or by external callers requiring PostgreSQL SQL compilation.
+//
+// When can it be used:
+// Can be used whenever an application holds a PostgresAdapter instance and needs to compile a dataset.
 func (a *PostgresAdapter) CompileDataSet(ctx context.Context, ast *planner.QueryAST, ds *domain.DataSet) (*compiler.CompiledPipeline, error) {
 	return NewPostgresDataSetCompiler().Compile(ctx, ast, ds)
 }
 
 // DataSetCompiler returns the adapter.DataSetCompiler instance.
+//
+// Purpose:
+// Returns the generic adapter.DataSetCompiler interface wrapper for registering with DataSetService.
+//
+// Where it is used:
+// In application bootstrap and dependency injection (e.g. service.RegisterCompiler("postgres", pgAdapter.DataSetCompiler())).
+//
+// When can it be used:
+// Can be used when initializing the dataset engine and registering the PostgreSQL adapter compiler.
 func (a *PostgresAdapter) DataSetCompiler() adapter.DataSetCompiler {
 	return &genericCompilerWrapper{c: NewPostgresDataSetCompiler()}
 }
@@ -485,12 +607,32 @@ type genericCompilerWrapper struct {
 	c compiler.DataSetCompiler
 }
 
+// Compile adapts generic untyped arguments to typed AST and DataSet compiler calls.
+//
+// Purpose:
+// Unpacks generic `any` interface values into `*planner.QueryAST` and `*domain.DataSet` and delegates to the underlying compiler.
+//
+// Where it is used:
+// Called dynamically by DataSetService.Preview and DataSetService.Save via the adapter.DataSetCompiler interface.
+//
+// When can it be used:
+// Can be used whenever compiling across module boundaries where interface{} decoupling is employed.
 func (w *genericCompilerWrapper) Compile(ctx context.Context, ast any, ds any) (any, error) {
 	qAst, _ := ast.(*planner.QueryAST)
 	dSet, _ := ds.(*domain.DataSet)
 	return w.c.Compile(ctx, qAst, dSet)
 }
 
+// formatFilterCondition translates structured filter conditions into PostgreSQL WHERE clauses.
+//
+// Purpose:
+// Translates a column condition (supporting operators $gt, $gte, $lt, $lte, $ne, $regex, $like, $in) into PostgreSQL SQL.
+//
+// Where it is used:
+// In buildSelectSQL for base collection filters and table join ON filters.
+//
+// When can it be used:
+// Can be used whenever compiling filter conditions into PostgreSQL SQL statements.
 func formatFilterCondition(table, col string, val any) string {
 	targetTable := table
 	targetCol := col
@@ -531,6 +673,16 @@ func formatFilterCondition(table, col string, val any) string {
 	return fmt.Sprintf("\"%s\".\"%s\" = %s", targetTable, targetCol, formatSQLVal(val))
 }
 
+// formatSQLVal formats a Go value into a valid PostgreSQL SQL literal or expression.
+//
+// Purpose:
+// Converts numbers, booleans, strings, parameter placeholders, and date macros into properly formatted SQL tokens.
+//
+// Where it is used:
+// In formatFilterCondition and formatSQLIn.
+//
+// When can it be used:
+// Can be used whenever formatting literal values or macros into SQL text.
 func formatSQLVal(val any) string {
 	switch v := val.(type) {
 	case int, int32, int64, float32, float64:
@@ -560,6 +712,15 @@ func formatSQLVal(val any) string {
 }
 
 // parseCustomDateMacro translates custom relative date macros like C[-7d] into PostgreSQL interval expressions.
+//
+// Purpose:
+// Parses dynamic date macros such as C[-7d], C[+1m], C[0d], C[today], and C[now] into native PostgreSQL interval expressions.
+//
+// Where it is used:
+// In formatSQLVal when encountering dynamic date strings in filters.
+//
+// When can it be used:
+// Can be used whenever date offset expressions need to be converted to SQL intervals.
 func parseCustomDateMacro(s string) (string, bool) {
 	s = strings.TrimSpace(s)
 	if (strings.HasPrefix(s, "C[") || strings.HasPrefix(s, "c[")) && strings.HasSuffix(s, "]") {
@@ -608,6 +769,16 @@ func parseCustomDateMacro(s string) (string, bool) {
 	return "", false
 }
 
+// formatSQLIn formats slice elements into a comma-separated SQL list for IN clauses.
+//
+// Purpose:
+// Converts a slice of values into a comma-separated string of formatted SQL values.
+//
+// Where it is used:
+// In formatFilterCondition when processing $in operators.
+//
+// When can it be used:
+// Can be used whenever an array or slice must be rendered inside SQL IN (...).
 func formatSQLIn(val any) string {
 	if slice, ok := val.([]any); ok {
 		var formatted []string
@@ -619,6 +790,16 @@ func formatSQLIn(val any) string {
 	return formatSQLVal(val)
 }
 
+// isNumericString determines whether a string can be parsed as a valid numeric literal.
+//
+// Purpose:
+// Tests whether a string represents a valid integer or floating-point number.
+//
+// Where it is used:
+// In formatSQLVal and formatPostgresOperand to determine whether to emit quotes around the value.
+//
+// When can it be used:
+// Can be used whenever determining if a string value should be treated as a number or string literal in SQL.
 func isNumericString(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {

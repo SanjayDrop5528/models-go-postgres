@@ -1,3 +1,19 @@
+// Package postgres provides the PostgreSQL database adapter implementing the engine's Adapter interface.
+//
+// Usage:
+// This package manages live PostgreSQL database connectivity, schema introspection, metadata cataloging,
+// DDL migration execution, relational and raw query execution, transactional operations, and dataset routine compilation.
+//
+// Standalone Usage:
+//
+//	adp := postgres.NewPostgresAdapter("postgres://user:pass@localhost:5432/mydb?sslmode=disable")
+//	defer adp.Disconnect(ctx)
+//
+// Combined Usage with Validation Engine & Engine Services:
+//
+//	valEngine := validation.NewValidationEngine(validation.WithAdapter(adp))
+//	datasetService := service.NewDataSetService(nil, adp)
+//	datasetService.RegisterCompiler("postgres", adp.DataSetCompiler())
 package postgres
 
 import (
@@ -37,6 +53,15 @@ type PostgresAdapter struct {
 }
 
 // NewPostgresAdapter creates a new PostgreSQL adapter instance.
+//
+// Purpose:
+// Initializes a PostgreSQL adapter with connection details, DDL generators, query builders, and mock fallback stores.
+//
+// Where it is used:
+// In application bootstrap, CLI tools, server setup (e.g. server.go), and test suites.
+//
+// When can it be used:
+// Can be used whenever an application needs to interact with a PostgreSQL database or mock in-memory fallback.
 func NewPostgresAdapter(dsn string) *PostgresAdapter {
 	return &PostgresAdapter{
 		dsn:          dsn,
@@ -47,16 +72,44 @@ func NewPostgresAdapter(dsn string) *PostgresAdapter {
 }
 
 // WithSchemas configures specific PostgreSQL database schemas for introspection and operations.
+//
+// Purpose:
+// Restricts or configures the target PostgreSQL schemas (e.g. "public", "tenant_a") for introspection and table discovery.
+//
+// Where it is used:
+// Called during adapter initialization before running introspection or migration commands.
+//
+// When can it be used:
+// Can be used when working with multi-schema PostgreSQL databases or non-default schemas.
 func (a *PostgresAdapter) WithSchemas(schemas ...string) *PostgresAdapter {
 	a.schemas = schemas
 	return a
 }
 
+// Name returns the identifier of the adapter driver ("postgres").
+//
+// Purpose:
+// Identifies the adapter type to the engine for driver selection and dispatch.
+//
+// Where it is used:
+// In engine registry, logging, and capability negotiation.
+//
+// When can it be used:
+// Can be used whenever an adapter driver name is inspected.
 func (a *PostgresAdapter) Name() string {
 	return "postgres"
 }
 
 // Capabilities returns PostgreSQL's supported feature matrix.
+//
+// Purpose:
+// Advertises supported capabilities (transactions, DDL migration, stored procedures, functions, JSON validation).
+//
+// Where it is used:
+// In validation engine, query planner, and dataset service to verify database feature support.
+//
+// When can it be used:
+// Can be used before initiating advanced database features like stored procedures or JSON schema checks.
 func (a *PostgresAdapter) Capabilities() adapter.Capabilities {
 	return adapter.Capabilities{
 		Category:                    adapter.StorageCategoryRelational,
