@@ -3,9 +3,16 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+
 	"github.com/SanjayDrop5528/models-go-engine/adapter"
 	"github.com/SanjayDrop5528/models-go-engine/execution"
 	"github.com/SanjayDrop5528/models-go-engine/model"
@@ -13,10 +20,6 @@ import (
 	"github.com/SanjayDrop5528/models-go-engine/plan"
 	"github.com/SanjayDrop5528/models-go-engine/query"
 	"github.com/SanjayDrop5528/models-go-engine/schema"
-	"net/url"
-	"strings"
-	"sync"
-	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -561,6 +564,466 @@ func (a *PostgresAdapter) resolveTableName(ref model.ModelRef) string {
 	return tableName
 }
 
+type modelConfigRow struct {
+	ID      string
+	Schema  string
+	Name    string
+	Table   string
+	RefName string
+}
+
+func (a *PostgresAdapter) resolveRelationJoins(ctx context.Context, db *sql.DB, ref model.ModelRef, tableName string, q query.Query) ([]relationJoin, error) {
+	requested := relationRequestMap(q)
+	if len(requested) == 0 {
+		return nil, nil
+	}
+
+	sourceCfg, err := a.findModelConfig(ctx, db, ref.ID, ref.Name, tableName)
+	if err != nil {
+		return nil, err
+	}
+	if sourceCfg == nil {
+		return nil, fmt.Errorf("cannot resolve relations for model '%s': model_config metadata not found", ref.ID)
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT column_name, json_field, orbital_reference_model_id, orbital_reference_field_id, orbital_reference_validation, reference, ref_name
+		FROM metadata_catalog.data_models
+		WHERE model_id = $1
+		  AND is_orbital_reference = TRUE
+		  AND COALESCE(status, 'active') = 'active'
+	`, sourceCfg.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed loading orbital references for model '%s': %w", sourceCfg.ID, err)
+	}
+	defer rows.Close()
+
+	var joins []relationJoin
+	resolved := make(map[string]bool)
+	aliasCounts := make(map[string]int)
+	seenRelNames := make(map[string]int)
+
+	for rows.Next() {
+		var columnName, jsonField, targetModelID, targetFieldID, validation, refName sql.NullString
+		var refBytes []byte
+		if err := rows.Scan(&columnName, &jsonField, &targetModelID, &targetFieldID, &validation, &refBytes, &refName); err != nil {
+			return nil, err
+		}
+		if !targetModelID.Valid || strings.TrimSpace(targetModelID.String) == "" {
+			continue
+		}
+
+		targetCfg, err := a.findModelConfig(ctx, db, targetModelID.String, targetModelID.String, targetModelID.String)
+		if err != nil {
+			return nil, err
+		}
+		if targetCfg == nil {
+			continue
+		}
+
+		var baseRelName string
+		if refName.Valid && strings.TrimSpace(refName.String) != "" {
+			baseRelName = strings.TrimSpace(refName.String)
+		} else if len(refBytes) > 0 {
+			var refObj struct {
+				RelationName string `json:"relation_name"`
+				Alias        string `json:"alias"`
+			}
+			if json.Unmarshal(refBytes, &refObj) == nil {
+				if refObj.RelationName != "" {
+					baseRelName = refObj.RelationName
+				} else if refObj.Alias != "" {
+					baseRelName = refObj.Alias
+				}
+			}
+		}
+		if baseRelName == "" {
+			baseRelName = relationNameFromConfig(targetCfg)
+		} else {
+			baseRelName = toRelationName(baseRelName)
+		}
+
+		relName := uniqueRelationName(baseRelName, seenRelNames)
+
+		spec, wanted := requested[strings.ToLower(relName)]
+		var nestedPrefixMatches []string
+		for k := range requested {
+			if strings.HasPrefix(k, strings.ToLower(relName)+".") {
+				nestedPrefixMatches = append(nestedPrefixMatches, k)
+			}
+		}
+
+		if !wanted && len(nestedPrefixMatches) == 0 {
+			continue
+		}
+
+		sourceColumn := columnName.String
+		if sourceColumn == "" {
+			sourceColumn = jsonField.String
+		}
+		targetColumn := "id"
+		if targetFieldID.Valid && strings.TrimSpace(targetFieldID.String) != "" {
+			targetColumn = targetFieldID.String
+		} else {
+			var pkCol sql.NullString
+			_ = db.QueryRowContext(ctx, `
+				SELECT COALESCE(column_name, json_field)
+				FROM metadata_catalog.data_models
+				WHERE model_id = $1 AND is_primary_key = TRUE
+				LIMIT 1
+			`, targetCfg.ID).Scan(&pkCol)
+			if pkCol.Valid && strings.TrimSpace(pkCol.String) != "" {
+				targetColumn = strings.TrimSpace(pkCol.String)
+			}
+		}
+
+		alias := uniqueSQLAlias(relName, aliasCounts)
+
+		conditions := append([]string{}, spec.Conditions...)
+		if validation.Valid && validation.String == "exists_active" {
+			conditions = append(conditions, fmt.Sprintf("COALESCE(%s.is_active, TRUE) = TRUE", quoteIdent(alias)))
+		}
+
+		parentJoin := relationJoin{
+			Name:             relName,
+			SourceTable:      tableName,
+			SourceColumn:     sourceColumn,
+			TargetTable:      storageNameFromConfig(targetCfg),
+			TargetColumn:     targetColumn,
+			Alias:            alias,
+			Conditions:       conditions,
+			SelectedFields:   spec.Fields,
+			AdditionalOn:     spec.On,
+			OrderBy:          spec.Order,
+			LoadWithChildren: spec.LoadWithChildren,
+		}
+
+		for _, nestedKey := range nestedPrefixMatches {
+			parts := strings.Split(nestedKey, ".")
+			if len(parts) >= 2 {
+				childName := parts[1]
+				childJoin, err := a.resolveChildRelation(ctx, db, targetCfg, alias, childName, requested[nestedKey])
+				if err != nil {
+					return nil, err
+				}
+				if childJoin != nil {
+					parentJoin.NestedJoins = append(parentJoin.NestedJoins, childJoin)
+					resolved[nestedKey] = true
+				}
+			}
+		}
+
+		for _, sub := range spec.SubRelations {
+			childJoin, err := a.resolveChildRelation(ctx, db, targetCfg, alias, sub.Name, sub)
+			if err != nil {
+				return nil, err
+			}
+			if childJoin != nil {
+				parentJoin.NestedJoins = append(parentJoin.NestedJoins, childJoin)
+			}
+		}
+
+		joins = append(joins, parentJoin)
+		resolved[strings.ToLower(relName)] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for name := range requested {
+		if !resolved[name] {
+			return nil, fmt.Errorf("relation '%s' is not available on model '%s': no matching orbital reference found", requested[name].Name, sourceCfg.ID)
+		}
+	}
+
+	return joins, nil
+}
+
+func (a *PostgresAdapter) resolveChildRelation(ctx context.Context, db *sql.DB, parentCfg *modelConfigRow, parentAlias, childName string, spec query.RelationSpec) (*relationJoin, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT column_name, json_field, orbital_reference_model_id, orbital_reference_field_id, orbital_reference_validation, reference, ref_name
+		FROM metadata_catalog.data_models
+		WHERE model_id = $1
+		  AND is_orbital_reference = TRUE
+		  AND COALESCE(status, 'active') = 'active'
+	`, parentCfg.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed loading orbital references for parent model '%s': %w", parentCfg.ID, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var columnName, jsonField, targetModelID, targetFieldID, validation, refName sql.NullString
+		var refBytes []byte
+		if err := rows.Scan(&columnName, &jsonField, &targetModelID, &targetFieldID, &validation, &refBytes, &refName); err != nil {
+			return nil, err
+		}
+		if !targetModelID.Valid || strings.TrimSpace(targetModelID.String) == "" {
+			continue
+		}
+
+		targetCfg, err := a.findModelConfig(ctx, db, targetModelID.String, targetModelID.String, targetModelID.String)
+		if err != nil {
+			return nil, err
+		}
+		if targetCfg == nil {
+			continue
+		}
+
+		var baseRelName string
+		if refName.Valid && strings.TrimSpace(refName.String) != "" {
+			baseRelName = strings.TrimSpace(refName.String)
+		} else if len(refBytes) > 0 {
+			var refObj struct {
+				RelationName string `json:"relation_name"`
+				Alias        string `json:"alias"`
+			}
+			if json.Unmarshal(refBytes, &refObj) == nil {
+				if refObj.RelationName != "" {
+					baseRelName = refObj.RelationName
+				} else if refObj.Alias != "" {
+					baseRelName = refObj.Alias
+				}
+			}
+		}
+		if baseRelName == "" {
+			baseRelName = relationNameFromConfig(targetCfg)
+		} else {
+			baseRelName = toRelationName(baseRelName)
+		}
+
+		if !strings.EqualFold(baseRelName, childName) {
+			continue
+		}
+
+		sourceColumn := columnName.String
+		if sourceColumn == "" {
+			sourceColumn = jsonField.String
+		}
+		targetColumn := "id"
+		if targetFieldID.Valid && strings.TrimSpace(targetFieldID.String) != "" {
+			targetColumn = targetFieldID.String
+		} else {
+			var pkCol sql.NullString
+			_ = db.QueryRowContext(ctx, `
+				SELECT COALESCE(column_name, json_field)
+				FROM metadata_catalog.data_models
+				WHERE model_id = $1 AND is_primary_key = TRUE
+				LIMIT 1
+			`, targetCfg.ID).Scan(&pkCol)
+			if pkCol.Valid && strings.TrimSpace(pkCol.String) != "" {
+				targetColumn = strings.TrimSpace(pkCol.String)
+			}
+		}
+
+		alias := parentAlias + "__" + strings.ToLower(baseRelName)
+
+		conditions := append([]string{}, spec.Conditions...)
+		if validation.Valid && validation.String == "exists_active" {
+			conditions = append(conditions, fmt.Sprintf("COALESCE(%s.is_active, TRUE) = TRUE", quoteIdent(alias)))
+		}
+
+		return &relationJoin{
+			Name:             baseRelName,
+			SourceTable:      parentAlias,
+			ParentAlias:      parentAlias,
+			SourceColumn:     sourceColumn,
+			TargetTable:      storageNameFromConfig(targetCfg),
+			TargetColumn:     targetColumn,
+			Alias:            alias,
+			Conditions:       conditions,
+			SelectedFields:   spec.Fields,
+			AdditionalOn:     spec.On,
+			OrderBy:          spec.Order,
+			LoadWithChildren: spec.LoadWithChildren,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("child relation '%s' is not available on model '%s': no matching orbital reference found", childName, parentCfg.ID)
+}
+
+func relationRequestMap(q query.Query) map[string]query.RelationSpec {
+	requested := make(map[string]query.RelationSpec)
+	for _, name := range q.Relations {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		requested[strings.ToLower(name)] = query.RelationSpec{Name: name, LoadWithChildren: q.LoadWithChildren}
+	}
+	for _, spec := range q.RelationSpecs {
+		if strings.TrimSpace(spec.Name) == "" {
+			continue
+		}
+		requested[strings.ToLower(spec.Name)] = spec
+	}
+	return requested
+}
+
+func (a *PostgresAdapter) findModelConfig(ctx context.Context, db *sql.DB, idOrName, name, tableName string) (*modelConfigRow, error) {
+	schemaName, cleanTable := splitStorageName(tableName)
+	candidates := uniqueNonEmpty(idOrName, name, tableName, cleanTable)
+	for _, candidate := range candidates {
+		row := db.QueryRowContext(ctx, `
+			SELECT id, COALESCE(schema, ''), COALESCE(name, ''), COALESCE("table", ''), COALESCE(ref_name, '')
+			FROM metadata_catalog.model_configs
+			WHERE id = $1
+			   OR name = $1
+			   OR "table" = $1
+			   OR ref_name = $1
+			   OR ($2 <> '' AND schema = $2 AND "table" = $3)
+			LIMIT 1
+		`, candidate, schemaName, cleanTable)
+
+		var cfg modelConfigRow
+		if err := row.Scan(&cfg.ID, &cfg.Schema, &cfg.Name, &cfg.Table, &cfg.RefName); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return nil, err
+		}
+		return &cfg, nil
+	}
+	return nil, nil
+}
+
+func splitStorageName(storage string) (string, string) {
+	storage = strings.Trim(storage, `"`)
+	if strings.Contains(storage, ".") {
+		parts := strings.SplitN(storage, ".", 2)
+		return strings.Trim(parts[0], `"`), strings.Trim(parts[1], `"`)
+	}
+	return "", storage
+}
+
+func storageNameFromConfig(cfg *modelConfigRow) string {
+	if cfg == nil {
+		return ""
+	}
+	table := cfg.Table
+	if table == "" {
+		table = cfg.RefName
+	}
+	if table == "" {
+		table = cfg.Name
+	}
+	if cfg.Schema != "" && cfg.Schema != "public" && !strings.Contains(table, ".") {
+		return cfg.Schema + "." + table
+	}
+	return table
+}
+
+func relationNameFromConfig(cfg *modelConfigRow) string {
+	if cfg == nil {
+		return "Relation"
+	}
+	for _, candidate := range []string{cfg.Name, cfg.RefName, cfg.Table, cfg.ID} {
+		if strings.TrimSpace(candidate) != "" {
+			return toRelationName(candidate)
+		}
+	}
+	return "Relation"
+}
+
+func toRelationName(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "Relation"
+	}
+	if idx := strings.LastIndex(raw, "."); idx >= 0 {
+		raw = raw[idx+1:]
+	}
+	raw = strings.TrimSuffix(raw, "_id")
+	raw = strings.TrimSuffix(raw, "Id")
+	if strings.HasSuffix(strings.ToLower(raw), "ies") && len(raw) > 3 {
+		raw = raw[:len(raw)-3] + "y"
+	} else if strings.HasSuffix(strings.ToLower(raw), "s") && len(raw) > 1 {
+		raw = raw[:len(raw)-1]
+	}
+
+	words := splitIdentifierWords(raw)
+	if len(words) == 0 {
+		return "Relation"
+	}
+
+	var b strings.Builder
+	for _, w := range words {
+		if w == "" {
+			continue
+		}
+		runes := []rune(w)
+		runes[0] = unicode.ToUpper(runes[0])
+		b.WriteString(string(runes))
+	}
+	if b.Len() == 0 {
+		return "Relation"
+	}
+	return b.String()
+}
+
+func splitIdentifierWords(s string) []string {
+	var words []string
+	var current []rune
+	for i, r := range s {
+		if r == '_' || r == '-' || r == ' ' {
+			if len(current) > 0 {
+				words = append(words, string(current))
+				current = nil
+			}
+			continue
+		}
+		if unicode.IsUpper(r) && len(current) > 0 {
+			prev := current[len(current)-1]
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) || (i+1 < len(s) && unicode.IsLower(rune(s[i+1]))) {
+				words = append(words, string(current))
+				current = nil
+			}
+		}
+		current = append(current, r)
+	}
+	if len(current) > 0 {
+		words = append(words, string(current))
+	}
+	return words
+}
+
+func uniqueRelationName(base string, seen map[string]int) string {
+	if base == "" {
+		base = "Relation"
+	}
+	count := seen[base]
+	seen[base] = count + 1
+	if count == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s%d", base, count+1)
+}
+
+func uniqueSQLAlias(base string, seen map[string]int) string {
+	if base == "" {
+		base = "relation"
+	}
+	count := seen[base]
+	seen[base] = count + 1
+	if count == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s%d", base, count+1)
+}
+
+func uniqueNonEmpty(values ...string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
 // Create inserts a row using parameterized SQL.
 func (a *PostgresAdapter) Create(ctx context.Context, ref model.ModelRef, data map[string]any) (map[string]any, error) {
 	tableName := a.resolveTableName(ref)
@@ -589,6 +1052,9 @@ func (a *PostgresAdapter) Find(ctx context.Context, ref model.ModelRef, q query.
 	tableName := a.resolveTableName(ref)
 	db, _ := a.getDB(ctx)
 	if db == nil {
+		if len(q.Relations) > 0 || len(q.RelationSpecs) > 0 {
+			return nil, 0, fmt.Errorf("relations require live PostgreSQL metadata; no database connection is available")
+		}
 		a.mu.RLock()
 		defer a.mu.RUnlock()
 		rows := a.mockStore[tableName]
@@ -603,7 +1069,12 @@ func (a *PostgresAdapter) Find(ctx context.Context, ref model.ModelRef, q query.
 		return results, int64(len(results)), nil
 	}
 
-	sqlStr, args := a.queryBuilder.BuildSelect(tableName, q)
+	relationJoins, err := a.resolveRelationJoins(ctx, db, ref, tableName, q)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	sqlStr, args := a.queryBuilder.BuildSelectWithRelations(tableName, q, relationJoins)
 	rows, err := db.QueryContext(ctx, sqlStr, args...)
 	if err != nil {
 		return nil, 0, err
@@ -628,12 +1099,32 @@ func (a *PostgresAdapter) Find(ctx context.Context, ref model.ModelRef, q query.
 		rowMap := make(map[string]any)
 		for i, colName := range cols {
 			val := columnPointers[i].(*any)
-			rowMap[colName] = *val
+			rowMap[colName] = normalizePostgresValue(*val)
 		}
 		results = append(results, rowMap)
 	}
 
 	return results, int64(len(results)), nil
+}
+
+func normalizePostgresValue(val any) any {
+	switch v := val.(type) {
+	case []byte:
+		if len(v) == 0 {
+			return ""
+		}
+		var obj map[string]any
+		if json.Unmarshal(v, &obj) == nil {
+			return obj
+		}
+		var arr []any
+		if json.Unmarshal(v, &arr) == nil {
+			return arr
+		}
+		return string(v)
+	default:
+		return val
+	}
 }
 
 // FindOne finds a record by ID.

@@ -64,6 +64,20 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 
 	// 2. Custom Columns
 	for _, cc := range ast.CustomColumns {
+		// When query has GROUP BY, row-level calculations cannot be projected unless grouped
+		if len(ast.GroupBy) > 0 && !cc.IsAggregate {
+			inGroupBy := false
+			for _, g := range ast.GroupBy {
+				if strings.EqualFold(g.Field, cc.Alias) || strings.EqualFold(g.Field, cc.Label) {
+					inGroupBy = true
+					break
+				}
+			}
+			if !inGroupBy {
+				continue
+			}
+		}
+
 		expr := cc.Expression
 		if cc.Function != nil && cc.Function.PostgresExpression != "" {
 			expr = renderPostgresFunctionExpression(cc.Function.PostgresExpression, cc.Operands)
@@ -204,7 +218,12 @@ func renderPostgresFunctionExpression(template string, operands []planner.ASTOpe
 		expr = strings.ReplaceAll(expr, fmt.Sprintf("{{%d}}", i), opSQL)
 		allArgs = append(allArgs, opSQL)
 	}
-	return strings.ReplaceAll(expr, "{{args}}", strings.Join(allArgs, ", "))
+	expr = strings.ReplaceAll(expr, "{{args}}", strings.Join(allArgs, ", "))
+	if strings.Contains(expr, "{{") {
+		expr = strings.ReplaceAll(expr, ", {{1}}", "")
+		expr = strings.ReplaceAll(expr, ", {{2}}", "")
+	}
+	return expr
 }
 
 func buildPostgresFunctionExpression(fnName string, operands []planner.ASTOperand) string {
@@ -223,6 +242,13 @@ func buildPostgresFunctionExpression(fnName string, operands []planner.ASTOperan
 		return fmt.Sprintf("COUNT(%s)", first)
 	case "COUNT_DISTINCT":
 		return fmt.Sprintf("COUNT(DISTINCT %s)", first)
+	case "COUNT_IF":
+		return fmt.Sprintf("COUNT(CASE WHEN %s THEN 1 END)", first)
+	case "SUM_IF":
+		if len(operands) >= 2 {
+			return fmt.Sprintf("SUM(CASE WHEN %s THEN %s ELSE 0 END)", first, formatPostgresOperand(operands[1]))
+		}
+		return fmt.Sprintf("SUM(CASE WHEN %s THEN 1 ELSE 0 END)", first)
 	case "SUM", "AVG", "MIN", "MAX", "ABS", "SQRT":
 		return fmt.Sprintf("%s(%s)", fn, first)
 	case "ADD":
@@ -236,6 +262,25 @@ func buildPostgresFunctionExpression(fnName string, operands []planner.ASTOperan
 			return ""
 		}
 		return fmt.Sprintf("(%s / NULLIF(%s, 0))", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+	case "MODULO", "MOD":
+		if len(operands) < 2 {
+			return ""
+		}
+		return fmt.Sprintf("MOD(%s, %s)", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+	case "POWER", "POW":
+		if len(operands) < 2 {
+			return ""
+		}
+		return fmt.Sprintf("POWER(%s, %s)", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+	case "ROUND":
+		if len(operands) >= 2 {
+			return fmt.Sprintf("ROUND(%s, %s)", first, formatPostgresOperand(operands[1]))
+		}
+		return fmt.Sprintf("ROUND(%s)", first)
+	case "CEIL", "CEILING":
+		return fmt.Sprintf("CEIL(%s)", first)
+	case "FLOOR":
+		return fmt.Sprintf("FLOOR(%s)", first)
 	case "CONCAT":
 		return fmt.Sprintf("CONCAT(%s)", strings.Join(formatPostgresOperands(operands), ", "))
 	case "CONCAT_WS":
@@ -246,6 +291,18 @@ func buildPostgresFunctionExpression(fnName string, operands []planner.ASTOperan
 		return fmt.Sprintf("CONCAT_WS(%s)", strings.Join(args, ", "))
 	case "UPPER", "LOWER", "TRIM", "LENGTH":
 		return fmt.Sprintf("%s(%s)", fn, first)
+	case "SUBSTRING":
+		args := formatPostgresOperands(operands)
+		if len(args) < 2 {
+			return ""
+		}
+		return fmt.Sprintf("SUBSTRING(%s)", strings.Join(args, ", "))
+	case "REPLACE":
+		args := formatPostgresOperands(operands)
+		if len(args) < 3 {
+			return ""
+		}
+		return fmt.Sprintf("REPLACE(%s, %s, %s)", args[0], args[1], args[2])
 	case "YEAR":
 		return fmt.Sprintf("EXTRACT(YEAR FROM %s)", first)
 	case "MONTH":
@@ -256,6 +313,66 @@ func buildPostgresFunctionExpression(fnName string, operands []planner.ASTOperan
 		return "NOW()"
 	case "CURRENT_DATE":
 		return "CURRENT_DATE"
+	case "DATE_ADD":
+		if len(operands) < 2 {
+			return ""
+		}
+		unit := "days"
+		if len(operands) >= 3 {
+			unit = strings.Trim(formatPostgresOperand(operands[2]), "'\"")
+		}
+		return fmt.Sprintf("(%s + (%s || ' %s')::interval)", first, formatPostgresOperand(operands[1]), unit)
+	case "DATE_DIFF", "DATEDIFF":
+		if len(operands) < 2 {
+			return ""
+		}
+		return fmt.Sprintf("(%s::date - %s::date)", first, formatPostgresOperand(operands[1]))
+	case "EQUAL":
+		if len(operands) < 2 {
+			return ""
+		}
+		return fmt.Sprintf("(%s = %s)", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+	case "NOT_EQUAL":
+		if len(operands) < 2 {
+			return ""
+		}
+		return fmt.Sprintf("(%s != %s)", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+	case "GREATER_THAN":
+		if len(operands) < 2 {
+			return ""
+		}
+		return fmt.Sprintf("(%s > %s)", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+	case "LESS_THAN":
+		if len(operands) < 2 {
+			return ""
+		}
+		return fmt.Sprintf("(%s < %s)", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+	case "COALESCE":
+		args := formatPostgresOperands(operands)
+		return fmt.Sprintf("COALESCE(%s)", strings.Join(args, ", "))
+	case "CASE", "IF":
+		if len(operands) >= 3 {
+			return fmt.Sprintf("CASE WHEN %s THEN %s ELSE %s END", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]), formatPostgresOperand(operands[2]))
+		} else if len(operands) == 2 {
+			return fmt.Sprintf("CASE WHEN %s THEN %s END", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+		}
+		return ""
+	case "TO_STRING":
+		return fmt.Sprintf("CAST(%s AS TEXT)", first)
+	case "TO_INTEGER":
+		return fmt.Sprintf("CAST(%s AS INTEGER)", first)
+	case "TO_DECIMAL":
+		return fmt.Sprintf("CAST(%s AS NUMERIC)", first)
+	case "PERCENTAGE":
+		if len(operands) < 2 {
+			return ""
+		}
+		return fmt.Sprintf("((%s / NULLIF(%s, 0)) * 100.0)", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+	case "DISCOUNT":
+		if len(operands) < 2 {
+			return ""
+		}
+		return fmt.Sprintf("(%s - (%s * (%s / 100.0)))", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
 	default:
 		return ""
 	}
@@ -277,9 +394,16 @@ func formatPostgresOperands(operands []planner.ASTOperand) []string {
 }
 
 func formatPostgresOperand(op planner.ASTOperand) string {
-	if op.SourceTable == "" || op.SourceTable == "_LITERAL_" {
-		if op.IsLiteral {
-			return fmt.Sprintf("%v", op.LiteralVal)
+	if op.SourceTable == "" || op.SourceTable == "_LITERAL_" || op.SourceTable == "CALC" {
+		valStr := fmt.Sprintf("%v", op.LiteralVal)
+		if valStr == "" && op.SourceField != "" {
+			valStr = op.SourceField
+		}
+		if op.IsLiteral || op.SourceTable == "_LITERAL_" {
+			if isNumericString(valStr) || strings.HasPrefix(valStr, "'") || strings.EqualFold(valStr, "TRUE") || strings.EqualFold(valStr, "FALSE") || strings.EqualFold(valStr, "NULL") {
+				return valStr
+			}
+			return fmt.Sprintf("'%s'", strings.ReplaceAll(valStr, "'", "''"))
 		}
 		return fmt.Sprintf("\"%s\"", op.SourceField)
 	}
