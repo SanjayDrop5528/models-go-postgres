@@ -1,12 +1,30 @@
+// Package postgres implements the PostgreSQL storage adapter, query generator,
+// DDL schema migrator, introspection engine, and Dataset Studio compiler.
+//
+// File: types.go
+// Usage:
+//   This file defines the bidirectional type mapping between core engine generic DataType
+//   enums (model.TypeString, model.TypeInt, model.TypeDecimal, model.TypeJSON, etc.) and
+//   PostgreSQL-native SQL data types (VARCHAR, SERIAL, NUMERIC, JSONB, TIMESTAMPTZ, etc.).
 package postgres
 
 import (
 	"fmt"
+
 	"github.com/SanjayDrop5528/models-go-engine/model"
 	"github.com/SanjayDrop5528/models-go-engine/schema"
 )
 
 // ToPostgresType maps core generic DataType to PostgreSQL SQL types.
+//
+// Purpose:
+//   Translates an engine schema attribute into a valid PostgreSQL column type string (e.g. VARCHAR(255), NUMERIC(10,2)).
+//
+// Where it is used:
+//   - Used by DDLGenerator when constructing CREATE TABLE and ADD COLUMN statements.
+//
+// When can it be used:
+//   - When translating core schema definitions into PostgreSQL table columns.
 func ToPostgresType(attr schema.SchemaAttribute) string {
 	switch attr.Type {
 	case model.TypeString:
@@ -69,6 +87,15 @@ func ToPostgresType(attr schema.SchemaAttribute) string {
 }
 
 // FromPostgresType maps PostgreSQL information_schema data_type string back to core DataType.
+//
+// Purpose:
+//   Translates raw catalog type strings (e.g. "character varying", "timestamptz", "jsonb") into engine DataType constants.
+//
+// Where it is used:
+//   - Used by Introspector when reverse-engineering tables from information_schema.columns.
+//
+// When can it be used:
+//   - When converting database-discovered column types into generic engine types.
 func FromPostgresType(pgType string) model.DataType {
 	switch pgType {
 	case "character varying", "varchar", "character", "char":

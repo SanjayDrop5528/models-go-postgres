@@ -1,3 +1,14 @@
+// Package postgres implements the PostgreSQL storage adapter, query generator,
+// DDL schema migrator, introspection engine, and Dataset Studio compiler.
+//
+// File: introspection.go
+// Usage:
+//
+//	This file implements the PostgreSQL Introspector, which queries the PostgreSQL system
+//	catalogs (information_schema.schemata, information_schema.tables, information_schema.columns,
+//	information_schema.table_constraints, and key_column_usage) to discover live schemas,
+//	tables, columns, data types, primary keys, and foreign keys for reverse-engineering into
+//	normalized core Schema representations.
 package postgres
 
 import (
@@ -22,15 +33,46 @@ type Introspector struct {
 }
 
 // NewIntrospector creates an introspector instance.
+//
+// Purpose:
+//
+//	Initializes an Introspector wrapping a live PostgreSQL *sql.DB connection pool.
+//
+// Where it is used:
+//   - Instantiated in PostgresAdapter.Connect and PostgresAdapter.GetSchema.
+//
+// When can it be used:
+//   - Whenever examining live PostgreSQL database structure without ORMs.
 func NewIntrospector(db *sql.DB) *Introspector {
 	return &Introspector{db: db}
 }
 
+// DB returns the underlying database handle.
+//
+// Purpose:
+//
+//	Provides access to the raw *sql.DB for low-level transactions and catalog checks.
+//
+// Where it is used:
+//   - Used by adapter methods requiring direct connection handles.
+//
+// When can it be used:
+//   - When executing custom catalog inspection queries.
 func (i *Introspector) DB() *sql.DB {
 	return i.db
 }
 
 // ListSchemas queries PostgreSQL catalogs for all user-defined schemas.
+//
+// Purpose:
+//
+//	Discovers all user schemas excluding system schemas (pg_catalog, information_schema, pg_toast).
+//
+// Where it is used:
+//   - Called by table discovery and multi-schema inspection routines.
+//
+// When can it be used:
+//   - When enumerating available schemas in a multi-tenant PostgreSQL database.
 func (i *Introspector) ListSchemas(ctx context.Context) ([]string, error) {
 	if i.db == nil {
 		return nil, nil
@@ -59,6 +101,16 @@ func (i *Introspector) ListSchemas(ctx context.Context) ([]string, error) {
 
 // ListTables queries PostgreSQL catalogs for user base tables across target schemas.
 // If schemas is empty or contains "ALL" / "*", it queries all user-defined schemas (excluding pg_catalog, information_schema, pg_toast).
+//
+// Purpose:
+//
+//	Discovers live database tables across designated schemas for catalog registration and live reverse engineering.
+//
+// Where it is used:
+//   - Called by PostgresAdapter.ImportLiveMetadata and database schema sync APIs.
+//
+// When can it be used:
+//   - When discovering existing database tables to map into the models engine.
 func (i *Introspector) ListTables(ctx context.Context, schemas ...string) ([]TableItem, error) {
 	if i.db == nil {
 		return nil, nil
@@ -116,6 +168,17 @@ func (i *Introspector) ListTables(ctx context.Context, schemas ...string) ([]Tab
 
 // IntrospectTable inspects columns, primary keys, and indexes for a specific PostgreSQL table.
 // If tableName contains "schema.table", it splits it automatically. If omitted, attempts lookup across user schemas.
+//
+// Purpose:
+//
+//	Constructs a complete, normalized Schema definition by querying table column metadata, data types,
+//	nullability, primary keys, and foreign keys from PostgreSQL information_schema.
+//
+// Where it is used:
+//   - Called by PostgresAdapter.GetSchema and live reverse-engineering pipelines.
+//
+// When can it be used:
+//   - When reverse-engineering an existing PostgreSQL table into engine schema models.
 func (i *Introspector) IntrospectTable(ctx context.Context, tableName string) (*schema.Schema, error) {
 	schemaName := "public"
 	tableOnly := tableName

@@ -1,21 +1,48 @@
+// Package postgres implements the PostgreSQL storage adapter, query generator,
+// DDL schema migrator, introspection engine, and Dataset Studio compiler.
+//
+// File: ddl.go
+// Usage:
+//   This file implements the PostgreSQL DDLGenerator, which converts abstract SchemaOperations
+//   (OpCreateTable, OpDropTable, OpAddColumn, OpDropColumn, OpModifyColumn, OpCreateIndex, etc.)
+//   into precise, transaction-safe PostgreSQL DDL SQL statements.
 package postgres
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/SanjayDrop5528/models-go-engine/diff"
 	"github.com/SanjayDrop5528/models-go-engine/schema"
-	"strings"
 )
 
 // DDLGenerator compiles core SchemaOperations into exact, minimal PostgreSQL DDL SQL statements.
 type DDLGenerator struct{}
 
 // NewDDLGenerator creates a new PostgreSQL DDL compiler.
+//
+// Purpose:
+//   Initializes a PostgreSQL DDLGenerator instance.
+//
+// Where it is used:
+//   - Instantiated in PostgresAdapter.ApplySchemaChange and PreviewSchemaChange.
+//
+// When can it be used:
+//   - When translating schema diff plans into executable PostgreSQL migration scripts.
 func NewDDLGenerator() *DDLGenerator {
 	return &DDLGenerator{}
 }
 
 // GenerateStatements transforms a slice of SchemaOperations into PostgreSQL SQL queries.
+//
+// Purpose:
+//   Iterates through a list of schema operations and generates an ordered list of PostgreSQL DDL statements.
+//
+// Where it is used:
+//   - Called by PostgresAdapter during schema synchronization and migration previews.
+//
+// When can it be used:
+//   - When generating complete migration scripts for a schema diff plan.
 func (g *DDLGenerator) GenerateStatements(ops []diff.SchemaOperation) ([]string, error) {
 	statements := make([]string, 0, len(ops))
 
@@ -33,6 +60,15 @@ func (g *DDLGenerator) GenerateStatements(ops []diff.SchemaOperation) ([]string,
 }
 
 // GenerateStatement transforms an individual SchemaOperation into a PostgreSQL DDL string.
+//
+// Purpose:
+//   Translates a single schema operation (table creation, column drop, index add) into PostgreSQL SQL.
+//
+// Where it is used:
+//   - Called by GenerateStatements for each planned operation.
+//
+// When can it be used:
+//   - When generating SQL for a single atomic schema alteration.
 func (g *DDLGenerator) GenerateStatement(op diff.SchemaOperation) (string, error) {
 	table := quoteIdent(op.TargetTable)
 
