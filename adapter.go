@@ -53,6 +53,21 @@ func (a *PostgresAdapter) Name() string {
 	return "postgres"
 }
 
+// Capabilities returns PostgreSQL's supported feature matrix.
+func (a *PostgresAdapter) Capabilities() adapter.Capabilities {
+	return adapter.Capabilities{
+		Category:                    adapter.StorageCategoryRelational,
+		SupportsTransactions:        true,
+		SupportsDDLMigration:        true,
+		SupportsProcedures:          true,
+		SupportsFunctions:           true,
+		SupportsAggregationPipeline: false,
+		SupportsJSONValidation:      true,
+		SupportsIndexes:             true,
+		SupportedSaveModes:          []string{"PROCEDURE", "FUNCTION", "QUERY"},
+	}
+}
+
 // NativeClient returns the underlying *sql.DB connection handle.
 func (a *PostgresAdapter) NativeClient() any {
 	return a.DB()
