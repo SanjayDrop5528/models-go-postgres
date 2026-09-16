@@ -66,35 +66,13 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 	for _, cc := range ast.CustomColumns {
 		expr := cc.Expression
 		if cc.Function != nil && cc.Function.PostgresExpression != "" {
-			expr = cc.Function.PostgresExpression
-			for i, op := range cc.Operands {
-				ph := fmt.Sprintf("{{%d}}", i)
-				var opSql string
-				if op.SourceTable == "" || op.SourceTable == "_LITERAL_" {
-					if op.IsLiteral {
-						opSql = op.SourceField
-					} else {
-						opSql = fmt.Sprintf("\"%s\"", op.SourceField)
-					}
-				} else {
-					opSql = fmt.Sprintf("\"%s\".\"%s\"", op.SourceTable, op.SourceField)
-				}
-				expr = strings.ReplaceAll(expr, ph, opSql)
-			}
-			// Handle {{args}}
-			var allArgs []string
-			for _, op := range cc.Operands {
-				if op.SourceTable == "" || op.SourceTable == "_LITERAL_" {
-					if op.IsLiteral {
-						allArgs = append(allArgs, op.SourceField)
-					} else {
-						allArgs = append(allArgs, fmt.Sprintf("\"%s\"", op.SourceField))
-					}
-				} else {
-					allArgs = append(allArgs, fmt.Sprintf("\"%s\".\"%s\"", op.SourceTable, op.SourceField))
-				}
-			}
-			expr = strings.ReplaceAll(expr, "{{args}}", strings.Join(allArgs, ", "))
+			expr = renderPostgresFunctionExpression(cc.Function.PostgresExpression, cc.Operands)
+		} else if expr == "" && cc.Function != nil {
+			expr = buildPostgresFunctionExpression(cc.Function.Name, cc.Operands)
+		} else if expr == "" && cc.IsAggregate {
+			expr = buildPostgresFunctionExpression(cc.FunctionName, cc.Operands)
+		} else if expr == "" && cc.FunctionName != "" {
+			expr = buildPostgresFunctionExpression(cc.FunctionName, cc.Operands)
 		}
 
 		if expr != "" {
@@ -216,6 +194,96 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 	}
 
 	return sql + ";"
+}
+
+func renderPostgresFunctionExpression(template string, operands []planner.ASTOperand) string {
+	expr := template
+	var allArgs []string
+	for i, op := range operands {
+		opSQL := formatPostgresOperand(op)
+		expr = strings.ReplaceAll(expr, fmt.Sprintf("{{%d}}", i), opSQL)
+		allArgs = append(allArgs, opSQL)
+	}
+	return strings.ReplaceAll(expr, "{{args}}", strings.Join(allArgs, ", "))
+}
+
+func buildPostgresFunctionExpression(fnName string, operands []planner.ASTOperand) string {
+	fn := strings.ToUpper(strings.TrimSpace(fnName))
+	first := "*"
+	if len(operands) > 0 {
+		first = formatPostgresOperand(operands[0])
+	}
+	switch fn {
+	case "COUNT_ALL", "COUNT(*)":
+		return "COUNT(*)"
+	case "COUNT":
+		if first == "" {
+			first = "*"
+		}
+		return fmt.Sprintf("COUNT(%s)", first)
+	case "COUNT_DISTINCT":
+		return fmt.Sprintf("COUNT(DISTINCT %s)", first)
+	case "SUM", "AVG", "MIN", "MAX", "ABS", "SQRT":
+		return fmt.Sprintf("%s(%s)", fn, first)
+	case "ADD":
+		return buildPostgresBinaryExpression(operands, "+")
+	case "SUBTRACT":
+		return buildPostgresBinaryExpression(operands, "-")
+	case "MULTIPLY":
+		return buildPostgresBinaryExpression(operands, "*")
+	case "DIVIDE":
+		if len(operands) < 2 {
+			return ""
+		}
+		return fmt.Sprintf("(%s / NULLIF(%s, 0))", formatPostgresOperand(operands[0]), formatPostgresOperand(operands[1]))
+	case "CONCAT":
+		return fmt.Sprintf("CONCAT(%s)", strings.Join(formatPostgresOperands(operands), ", "))
+	case "CONCAT_WS":
+		args := formatPostgresOperands(operands)
+		if len(args) == 0 {
+			return ""
+		}
+		return fmt.Sprintf("CONCAT_WS(%s)", strings.Join(args, ", "))
+	case "UPPER", "LOWER", "TRIM", "LENGTH":
+		return fmt.Sprintf("%s(%s)", fn, first)
+	case "YEAR":
+		return fmt.Sprintf("EXTRACT(YEAR FROM %s)", first)
+	case "MONTH":
+		return fmt.Sprintf("EXTRACT(MONTH FROM %s)", first)
+	case "DAY":
+		return fmt.Sprintf("EXTRACT(DAY FROM %s)", first)
+	case "NOW":
+		return "NOW()"
+	case "CURRENT_DATE":
+		return "CURRENT_DATE"
+	default:
+		return ""
+	}
+}
+
+func buildPostgresBinaryExpression(operands []planner.ASTOperand, op string) string {
+	if len(operands) < 2 {
+		return ""
+	}
+	return fmt.Sprintf("(%s %s %s)", formatPostgresOperand(operands[0]), op, formatPostgresOperand(operands[1]))
+}
+
+func formatPostgresOperands(operands []planner.ASTOperand) []string {
+	args := make([]string, 0, len(operands))
+	for _, op := range operands {
+		args = append(args, formatPostgresOperand(op))
+	}
+	return args
+}
+
+func formatPostgresOperand(op planner.ASTOperand) string {
+	if op.SourceTable == "" || op.SourceTable == "_LITERAL_" {
+		if op.IsLiteral {
+			return fmt.Sprintf("%v", op.LiteralVal)
+		}
+		return fmt.Sprintf("\"%s\"", op.SourceField)
+	}
+	return fmt.Sprintf("\"%s\".\"%s\"", op.SourceTable, op.SourceField)
 }
 
 func (c *PostgresDataSetCompiler) buildDDL(procName, baseSchema, querySQL string, params []domain.FilterParam, mode domain.SaveMode) string {
