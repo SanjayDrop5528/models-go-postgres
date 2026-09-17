@@ -566,13 +566,10 @@ $$;`, baseSchema, baseSchema, cleanName, strings.Join(paramDefs, ", "), strings.
 
 	return fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s;
 CREATE OR REPLACE PROCEDURE %s.sp_%s(%s)
-LANGUAGE plpgsql
+LANGUAGE sql
 AS $$
-BEGIN
-    -- Executable query for dataset '%s'
     %s
-END;
-$$;`, baseSchema, baseSchema, cleanName, strings.Join(paramDefs, ", "), procName, querySQL)
+$$;`, baseSchema, baseSchema, cleanName, strings.Join(paramDefs, ", "), querySQL)
 }
 
 // CompileDataSet compiles QueryAST into PostgreSQL SQL.
