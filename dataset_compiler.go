@@ -461,7 +461,8 @@ func buildPostgresBinaryExpression(operands []planner.ASTOperand, op string) str
 	if len(operands) < 2 {
 		return ""
 	}
-	return fmt.Sprintf("(%s %s %s)", formatPostgresOperand(operands[0]), op, formatPostgresOperand(operands[1]))
+	formatted := formatPostgresOperands(operands)
+	return fmt.Sprintf("(%s)", strings.Join(formatted, fmt.Sprintf(" %s ", op)))
 }
 
 // formatPostgresOperands formats a slice of ASTOperands into SQL operand strings.
