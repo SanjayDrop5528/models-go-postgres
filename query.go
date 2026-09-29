@@ -33,6 +33,11 @@ type RelationJoin struct {
 	ParentAlias      string
 	NestedJoins      []*RelationJoin
 	LoadWithChildren bool
+	// Many marks a reverse orbital reference (for example
+	// order_products.order_id -> orders.id). These relations are projected as a
+	// JSON array through a correlated subquery so the parent row is never
+	// duplicated by the child count.
+	Many bool
 }
 
 type relationJoin = RelationJoin
@@ -49,6 +54,22 @@ type relationJoin = RelationJoin
 // Can be used when querying a table without orbital reference relation expansion.
 func (b *QueryBuilder) BuildSelect(table string, q query.Query) (string, []any) {
 	return b.BuildSelectWithRelations(table, q, nil)
+}
+
+func (b *QueryBuilder) BuildCountWithRelations(table string, q query.Query, relations []RelationJoin) (string, []any) {
+	q.Fields = nil
+	q.ExcludedColumns = nil
+	q.Sorts = nil
+	q.Pagination = query.Pagination{}
+	q.CountTotal = false
+	countRelations := make([]relationJoin, len(relations))
+	copy(countRelations, relations)
+	for i := range countRelations {
+		countRelations[i].OrderBy = nil
+	}
+	inner, args := b.BuildSelectWithRelations(table, q, countRelations)
+	inner = strings.TrimSuffix(strings.TrimSpace(inner), ";")
+	return fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS _count;", inner), args
 }
 
 // BuildSelectWithRelations compiles a SELECT with explicit joins and metadata-backed relations.
@@ -113,7 +134,9 @@ func (b *QueryBuilder) BuildSelectWithRelations(table string, q query.Query, rel
 	}
 
 	for _, rel := range relations {
-		sql += b.buildRelationJoinSQL(rel)
+		if !rel.Many {
+			sql += b.buildRelationJoinSQL(rel)
+		}
 	}
 
 	if len(q.Filters) > 0 || len(q.RawWheres) > 0 || len(q.WhereGroups) > 0 {
@@ -131,6 +154,9 @@ func (b *QueryBuilder) BuildSelectWithRelations(table string, q query.Query, rel
 		sortClauses = append(sortClauses, fmt.Sprintf("%s %s", qualifyIdent(qualifier, s.Field), order))
 	}
 	for _, rel := range relations {
+		if rel.Many {
+			continue
+		}
 		for _, s := range rel.OrderBy {
 			order := "ASC"
 			if s.Order == query.SortDesc {
@@ -164,11 +190,18 @@ func (b *QueryBuilder) BuildSelectWithRelations(table string, q query.Query, rel
 // When can it be used:
 // Can be used whenever an orbital reference is selected and needs to be nested hierarchically.
 func (b *QueryBuilder) buildRelationColumnExpr(rel relationJoin) string {
+	if rel.Many {
+		return b.buildManyRelationColumnExpr(rel)
+	}
 	targetCol := rel.TargetColumn
 	if targetCol == "" {
 		targetCol = "id"
 	}
+	baseExpr := b.buildRelationJSONExpr(rel)
+	return fmt.Sprintf("CASE WHEN %s.%s IS NULL THEN NULL ELSE %s END AS %s", quoteIdent(rel.Alias), quoteIdent(targetCol), baseExpr, quoteIdent(rel.Name))
+}
 
+func (b *QueryBuilder) buildRelationJSONExpr(rel relationJoin) string {
 	var baseExpr string
 	if len(rel.SelectedFields) > 0 {
 		pairs := make([]string, 0, len(rel.SelectedFields)*2)
@@ -188,21 +221,52 @@ func (b *QueryBuilder) buildRelationColumnExpr(rel relationJoin) string {
 		if childTargetCol == "" {
 			childTargetCol = "id"
 		}
-		var childExpr string
-		if len(child.SelectedFields) > 0 {
-			cpairs := make([]string, 0, len(child.SelectedFields)*2)
-			for _, cf := range child.SelectedFields {
-				cpairs = append(cpairs, fmt.Sprintf("'%s'", cf), fmt.Sprintf("%s.%s", quoteIdent(child.Alias), quoteIdent(cf)))
-			}
-			childExpr = fmt.Sprintf("jsonb_build_object(%s)", strings.Join(cpairs, ", "))
-		} else {
-			childExpr = fmt.Sprintf("to_jsonb(%s.*)", quoteIdent(child.Alias))
-		}
+		childExpr := b.buildRelationJSONExpr(*child)
 		childExpr = fmt.Sprintf("CASE WHEN %s.%s IS NULL THEN NULL ELSE %s END", quoteIdent(child.Alias), quoteIdent(childTargetCol), childExpr)
 		baseExpr = fmt.Sprintf("(%s || jsonb_build_object('%s', %s))", baseExpr, child.Name, childExpr)
 	}
 
-	return fmt.Sprintf("CASE WHEN %s.%s IS NULL THEN NULL ELSE %s END AS %s", quoteIdent(rel.Alias), quoteIdent(targetCol), baseExpr, quoteIdent(rel.Name))
+	return baseExpr
+}
+
+// buildManyRelationColumnExpr projects a reverse orbital reference as an
+// always-present JSON array. A correlated subquery avoids multiplying parent
+// rows and keeps LIMIT/OFFSET semantics correct.
+func (b *QueryBuilder) buildManyRelationColumnExpr(rel relationJoin) string {
+	itemExpr := b.buildRelationJSONExpr(rel)
+
+	where := fmt.Sprintf("%s.%s = %s.%s",
+		quoteIdent(rel.Alias), quoteIdent(rel.SourceColumn),
+		quoteIdent(rel.SourceTable), quoteIdent(rel.TargetColumn),
+	)
+	if len(rel.Conditions) > 0 {
+		where += " AND " + strings.Join(rel.Conditions, " AND ")
+	}
+	if len(rel.AdditionalOn) > 0 {
+		where += " AND " + strings.Join(rel.AdditionalOn, " AND ")
+	}
+
+	order := ""
+	if len(rel.OrderBy) > 0 {
+		parts := make([]string, 0, len(rel.OrderBy))
+		for _, sort := range rel.OrderBy {
+			direction := "ASC"
+			if sort.Order == query.SortDesc {
+				direction = "DESC"
+			}
+			parts = append(parts, fmt.Sprintf("%s.%s %s", quoteIdent(rel.Alias), quoteIdent(sort.Field), direction))
+		}
+		order = " ORDER BY " + strings.Join(parts, ", ")
+	}
+
+	nestedJoins := ""
+	for _, child := range rel.NestedJoins {
+		if child != nil {
+			nestedJoins += b.buildRelationJoinSQL(*child)
+		}
+	}
+	return fmt.Sprintf("COALESCE((SELECT jsonb_agg(_relation_item) FROM (SELECT %s AS _relation_item FROM %s AS %s%s WHERE %s%s) AS _relation_rows), '[]'::jsonb) AS %s",
+		itemExpr, quoteIdent(rel.TargetTable), quoteIdent(rel.Alias), nestedJoins, where, order, quoteIdent(rel.Name))
 }
 
 // buildRelationJoinSQL generates the LEFT JOIN clause for an orbital relation.
@@ -216,6 +280,9 @@ func (b *QueryBuilder) buildRelationColumnExpr(rel relationJoin) string {
 // When can it be used:
 // Can be used whenever an orbital relation join must be appended to the SQL statement.
 func (b *QueryBuilder) buildRelationJoinSQL(rel relationJoin) string {
+	if rel.Many {
+		return ""
+	}
 	source := rel.SourceTable
 	if rel.ParentAlias != "" {
 		source = rel.ParentAlias

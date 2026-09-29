@@ -42,6 +42,20 @@ func TestPostgres_DDL_AddColumn(t *testing.T) {
 	}
 }
 
+func TestBuildCountWithRelationsRemovesPagination(t *testing.T) {
+	builder := &postgres.QueryBuilder{}
+	q := query.New().Where("status", query.OpEq, "active").OrderBy("created_at", query.SortDesc).LimitOffset(10, 20)
+	sqlText, args := builder.BuildCountWithRelations("orders", q, []postgres.RelationJoin{{
+		Name: "Customer", SourceTable: "orders", SourceColumn: "customer_id", TargetTable: "customers", TargetColumn: "id", Alias: "customer",
+	}})
+	if strings.Contains(sqlText, " LIMIT ") || strings.Contains(sqlText, " OFFSET ") || strings.Contains(sqlText, " ORDER BY ") {
+		t.Fatalf("count query must not contain pagination or sorting: %s", sqlText)
+	}
+	if !strings.HasPrefix(sqlText, "SELECT COUNT(*) FROM (") || len(args) != 1 || args[0] != "active" {
+		t.Fatalf("unexpected count query: %s args=%v", sqlText, args)
+	}
+}
+
 func TestPostgres_DDL_RenameColumn(t *testing.T) {
 	gen := postgres.NewDDLGenerator()
 
@@ -339,6 +353,89 @@ func TestPostgresQueryBuilder_BuildSelectWithRelations(t *testing.T) {
 	if !strings.Contains(sql4, `LEFT JOIN "employees" AS "emp"`) || !strings.Contains(sql4, `LEFT JOIN "departments" AS "dept"`) {
 		t.Fatalf("expected both joins emitted, got: %s", sql4)
 	}
+
+	// Scenario 5: reverse orbital reference is an array and must not join or
+	// duplicate the parent order row.
+	q5 := query.New().Where("id", query.OpEq, "order-1")
+	joins5 := []postgres.RelationJoin{
+		{
+			Name:           "OrderProducts",
+			SourceTable:    "orders",
+			SourceColumn:   "order_id",
+			TargetTable:    "order_products",
+			TargetColumn:   "id",
+			Alias:          "order_products",
+			SelectedFields: []string{"id", "product_id", "quantity"},
+			OrderBy:        []query.Sort{{Field: "id", Order: query.SortAsc}},
+			Many:           true,
+		},
+	}
+
+	sql5, _ := b.BuildSelectWithRelations("orders", q5, joins5)
+	if !strings.Contains(sql5, `COALESCE((SELECT jsonb_agg(_relation_item)`) ||
+		!strings.Contains(sql5, `FROM "order_products" AS "order_products" WHERE "order_products"."order_id" = "orders"."id" ORDER BY "order_products"."id" ASC`) ||
+		!strings.Contains(sql5, `'[]'::jsonb) AS "OrderProducts"`) {
+		t.Fatalf("expected reverse relation JSON array projection, got: %s", sql5)
+	}
+	if strings.Contains(sql5, `LEFT JOIN "order_products"`) {
+		t.Fatalf("reverse relation must not multiply parent rows with a LEFT JOIN: %s", sql5)
+	}
+
+	// Scenario 6: two object references to the same table retain independent
+	// aliases and values (for example billing and shipping addresses).
+	q6 := query.New()
+	joins6 := []postgres.RelationJoin{
+		{Name: "BillingAddress", SourceTable: "orders", SourceColumn: "billing_address_id", TargetTable: "addresses", TargetColumn: "id", Alias: "billing_address"},
+		{Name: "ShippingAddress", SourceTable: "orders", SourceColumn: "shipping_address_id", TargetTable: "addresses", TargetColumn: "id", Alias: "shipping_address"},
+	}
+	sql6, _ := b.BuildSelectWithRelations("orders", q6, joins6)
+	for _, expected := range []string{
+		`LEFT JOIN "addresses" AS "billing_address" ON "orders"."billing_address_id" = "billing_address"."id"`,
+		`LEFT JOIN "addresses" AS "shipping_address" ON "orders"."shipping_address_id" = "shipping_address"."id"`,
+		`AS "BillingAddress"`,
+		`AS "ShippingAddress"`,
+	} {
+		if !strings.Contains(sql6, expected) {
+			t.Fatalf("expected independent same-table object references (%s), got: %s", expected, sql6)
+		}
+	}
+
+	// Scenario 7: every nested level is both joined and projected.
+	q7 := query.New()
+	joins7 := []postgres.RelationJoin{
+		{
+			Name: "Department", SourceTable: "employees", SourceColumn: "department_id", TargetTable: "departments", TargetColumn: "id", Alias: "department",
+			NestedJoins: []*postgres.RelationJoin{
+				{
+					Name: "Organisation", SourceTable: "department", ParentAlias: "department", SourceColumn: "org_id", TargetTable: "organisations", TargetColumn: "id", Alias: "department__organisation",
+					NestedJoins: []*postgres.RelationJoin{
+						{Name: "Country", SourceTable: "department__organisation", ParentAlias: "department__organisation", SourceColumn: "country_id", TargetTable: "countries", TargetColumn: "id", Alias: "department__organisation__country"},
+					},
+				},
+			},
+		},
+	}
+	sql7, _ := b.BuildSelectWithRelations("employees", q7, joins7)
+	if !strings.Contains(sql7, `LEFT JOIN "countries" AS "department__organisation__country"`) ||
+		!strings.Contains(sql7, `jsonb_build_object('Country', CASE WHEN "department__organisation__country"."id" IS NULL`) {
+		t.Fatalf("expected all three relation levels to be loaded, got: %s", sql7)
+	}
+
+	// Scenario 8: an array relation can itself contain an orbital object.
+	q8 := query.New()
+	joins8 := []postgres.RelationJoin{
+		{
+			Name: "OrderProducts", SourceTable: "orders", SourceColumn: "order_id", TargetTable: "order_products", TargetColumn: "id", Alias: "order_products", Many: true,
+			NestedJoins: []*postgres.RelationJoin{
+				{Name: "Product", SourceTable: "order_products", ParentAlias: "order_products", SourceColumn: "product_id", TargetTable: "products", TargetColumn: "id", Alias: "order_products__product"},
+			},
+		},
+	}
+	sql8, _ := b.BuildSelectWithRelations("orders", q8, joins8)
+	if !strings.Contains(sql8, `LEFT JOIN "products" AS "order_products__product" ON "order_products"."product_id" = "order_products__product"."id"`) ||
+		!strings.Contains(sql8, `jsonb_build_object('Product', CASE WHEN "order_products__product"."id" IS NULL`) {
+		t.Fatalf("expected nested Product object inside OrderProducts array, got: %s", sql8)
+	}
 }
 
 func TestPostgresDataSetCompiler_AllCustomAndAggregateFunctions(t *testing.T) {
@@ -486,5 +583,3 @@ func TestPostgresDataSetCompiler_AllCustomAndAggregateFunctions(t *testing.T) {
 		}
 	}
 }
-
-

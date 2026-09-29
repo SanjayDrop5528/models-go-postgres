@@ -47,6 +47,74 @@ Compiles schema operations into PostgreSQL DDL statements.
 
 ## 🚀 Usage Example
 
+### Orbital relation loading
+
+Orbital values are lazy by default. Set `load_with_children: true` on the
+orbital `DataModel` field (or `LoadWithChildren: true` on an explicit
+`model.Relation`) to make the CRUD engine include that relation automatically
+for both `Find` and `FindOne`. When it is false, a normal read returns the
+stored foreign-key value only; an explicit `Relation(...)` request still loads
+it on demand.
+
+```go
+// Object references declared on orders, such as customer_id or two separate
+// address fields, are returned as independent JSON objects.
+q := query.New().
+    Relation("Customer").
+    Relation("BillingAddress").
+    Relation("ShippingAddress").
+    Relation("OrderProducts") // reverse order_products.order_id reference => array
+
+order, err := adapter.FindOneWithQuery(ctx, orderRef, orderID, q)
+```
+
+For the HTTP API, use either
+`GET /api/data/orders/{id}?relations=Customer,OrderProducts` or include
+`"relations": ["Customer", "OrderProducts"]` in the POST filter/query body.
+Forward references return an object (or `null`); reverse references return an
+array (or `[]`). Relation names can be made explicit and stable with
+`reference.relation_name`/`reference.alias`, which is recommended when two
+fields reference the same target table.
+
+The query is assembled in this order: the CRUD engine adds model relations
+whose `load_with_children` flag is true, merges explicit request relations,
+removes duplicates, and sends the resulting `query.Query` to the adapter. The
+PostgreSQL adapter resolves relation metadata and generates object joins or
+correlated JSON-array subqueries before executing the final SQL.
+
+Query debugging is opt-in and scoped to one request:
+
+```http
+GET /api/data/orders/123?debug=true
+GET /api/data/orders/123?relations=OrderProducts.Product&debug=true
+```
+
+```json
+{
+  "start": 0,
+  "end": 20,
+  "relations": ["Customer", "OrderProducts"],
+  "debug": true
+}
+```
+
+With `debug: true`, every query receives a correlation ID such as
+`query-000123`. Runtime logs include:
+
+- engine dispatch and automatic/explicit/lazy relation decisions;
+- relation path and cardinality (`object` or `array`);
+- source and target tables, columns, SQL aliases, conditions, selected fields,
+  ordering, and nested-relation count;
+- generated SQL or database filter shape; argument values are redacted by
+  default and appear only when `debug_include_args: true` is explicitly set;
+- returned columns, row counts, total counts, and execution duration;
+- relation-resolution, execution, scan, decode, and cursor errors.
+
+When false or omitted, no `[Query Debug]` messages are emitted. Set
+`slow_query_threshold_ms` to emit a correlated `slow-query` event when a query
+crosses the configured duration. Because unredacted bound arguments can contain
+application data, use `debug_include_args` only in an appropriate environment.
+
 ### PostgreSQL Stored Procedure Compilation & Execution
 
 ```go

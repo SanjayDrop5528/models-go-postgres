@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -301,6 +303,7 @@ func (a *PostgresAdapter) ensureMetadataTablesInternal(ctx context.Context, db *
 		scale INT,
 		items JSONB,
 		is_orbital_reference BOOLEAN DEFAULT FALSE,
+		load_with_children BOOLEAN DEFAULT FALSE,
 		orbital_reference_model_id VARCHAR(255),
 		orbital_reference_field_id VARCHAR(255),
 		orbital_reference_validation VARCHAR(100),
@@ -340,6 +343,9 @@ func (a *PostgresAdapter) ensureMetadataTablesInternal(ctx context.Context, db *
 	}
 	if _, err := db.ExecContext(ctx, createDMTable); err != nil {
 		return fmt.Errorf("failed to create 'metadata_catalog.data_models' table: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE metadata_catalog.data_models ADD COLUMN IF NOT EXISTS load_with_children BOOLEAN DEFAULT FALSE`); err != nil {
+		return fmt.Errorf("failed to add data_models.load_with_children: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, createDSTable); err != nil {
 		return fmt.Errorf("failed to create 'metadata_catalog.dataset' table: %w", err)
@@ -630,6 +636,11 @@ func (a *PostgresAdapter) resolveRelationJoins(ctx context.Context, db *sql.DB, 
 	if len(requested) == 0 {
 		return nil, nil
 	}
+	for _, spec := range requested {
+		if err := validateRelationSpecPredicates(spec); err != nil {
+			return nil, fmt.Errorf("invalid relation %q: %w", spec.Name, err)
+		}
+	}
 
 	sourceCfg, err := a.findModelConfig(ctx, db, ref.ID, ref.Name, tableName)
 	if err != nil {
@@ -645,6 +656,7 @@ func (a *PostgresAdapter) resolveRelationJoins(ctx context.Context, db *sql.DB, 
 		WHERE model_id = $1
 		  AND is_orbital_reference = TRUE
 		  AND COALESCE(status, 'active') = 'active'
+		ORDER BY id, column_name
 	`, sourceCfg.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed loading orbital references for model '%s': %w", sourceCfg.ID, err)
@@ -714,20 +726,9 @@ func (a *PostgresAdapter) resolveRelationJoins(ctx context.Context, db *sql.DB, 
 		if sourceColumn == "" {
 			sourceColumn = jsonField.String
 		}
-		targetColumn := "id"
-		if targetFieldID.Valid && strings.TrimSpace(targetFieldID.String) != "" {
-			targetColumn = targetFieldID.String
-		} else {
-			var pkCol sql.NullString
-			_ = db.QueryRowContext(ctx, `
-				SELECT COALESCE(column_name, json_field)
-				FROM metadata_catalog.data_models
-				WHERE model_id = $1 AND is_primary_key = TRUE
-				LIMIT 1
-			`, targetCfg.ID).Scan(&pkCol)
-			if pkCol.Valid && strings.TrimSpace(pkCol.String) != "" {
-				targetColumn = strings.TrimSpace(pkCol.String)
-			}
+		targetColumn, err := a.resolveMetadataColumn(ctx, db, targetCfg.ID, targetFieldID.String)
+		if err != nil {
+			return nil, err
 		}
 
 		alias := uniqueSQLAlias(relName, aliasCounts)
@@ -755,7 +756,8 @@ func (a *PostgresAdapter) resolveRelationJoins(ctx context.Context, db *sql.DB, 
 			parts := strings.Split(nestedKey, ".")
 			if len(parts) >= 2 {
 				childName := parts[1]
-				childJoin, err := a.resolveChildRelation(ctx, db, targetCfg, alias, childName, requested[nestedKey])
+				childSpec := relationSpecForPath(parts[1:], requested[nestedKey])
+				childJoin, err := a.resolveChildRelation(ctx, db, targetCfg, alias, childName, childSpec)
 				if err != nil {
 					return nil, err
 				}
@@ -782,6 +784,115 @@ func (a *PostgresAdapter) resolveRelationJoins(ctx context.Context, db *sql.DB, 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	// A child table can point back to the source model, for example
+	// order_products.order_id -> orders.id. Resolve that inverse edge as a
+	// collection so Relation("OrderProducts") returns [] rather than an object.
+	reverseRows, err := db.QueryContext(ctx, `
+		SELECT dm.column_name, dm.json_field, dm.orbital_reference_field_id,
+		       mc.id, COALESCE(mc.schema, ''), COALESCE(mc.name, ''),
+		       COALESCE(mc."table", ''), COALESCE(mc.ref_name, '')
+		FROM metadata_catalog.data_models dm
+		JOIN metadata_catalog.model_configs mc ON mc.id = dm.model_id
+		WHERE dm.is_orbital_reference = TRUE
+		  AND COALESCE(dm.status, 'active') = 'active'
+		  AND (dm.orbital_reference_model_id = $1
+		       OR dm.orbital_reference_model_id = $2
+		       OR dm.orbital_reference_model_id = $3
+		       OR dm.orbital_reference_model_id = $4)
+		ORDER BY dm.id, dm.column_name
+	`, sourceCfg.ID, sourceCfg.Name, sourceCfg.Table, sourceCfg.RefName)
+	if err != nil {
+		return nil, fmt.Errorf("failed loading reverse orbital references for model '%s': %w", sourceCfg.ID, err)
+	}
+	defer reverseRows.Close()
+
+	for reverseRows.Next() {
+		var sourceColumn, jsonField, targetFieldID sql.NullString
+		childCfg := &modelConfigRow{}
+		if err := reverseRows.Scan(&sourceColumn, &jsonField, &targetFieldID,
+			&childCfg.ID, &childCfg.Schema, &childCfg.Name, &childCfg.Table, &childCfg.RefName); err != nil {
+			return nil, err
+		}
+
+		baseName := pluralRelationName(relationNameFromConfig(childCfg))
+		singularName := relationNameFromConfig(childCfg)
+		requestedName, spec, wanted := findRequestedRelation(requested, baseName, singularName)
+		var nestedKeys []string
+		for key := range requested {
+			if strings.HasPrefix(key, strings.ToLower(baseName)+".") || strings.HasPrefix(key, strings.ToLower(singularName)+".") {
+				nestedKeys = append(nestedKeys, key)
+				if requestedName == "" {
+					requestedName = strings.Split(requested[key].Name, ".")[0]
+				}
+			}
+		}
+		sort.Strings(nestedKeys)
+		if !wanted && len(nestedKeys) == 0 {
+			continue
+		}
+
+		childColumn := strings.TrimSpace(sourceColumn.String)
+		if childColumn == "" {
+			childColumn = strings.TrimSpace(jsonField.String)
+		}
+		if childColumn == "" {
+			continue
+		}
+		parentColumn, err := a.resolveMetadataColumn(ctx, db, sourceCfg.ID, targetFieldID.String)
+		if err != nil {
+			return nil, err
+		}
+
+		alias := uniqueSQLAlias(requestedName, aliasCounts)
+		manyJoin := relationJoin{
+			Name:           requestedName,
+			SourceTable:    tableName,
+			SourceColumn:   childColumn,
+			TargetTable:    storageNameFromConfig(childCfg),
+			TargetColumn:   parentColumn,
+			Alias:          alias,
+			Conditions:     append([]string{}, spec.Conditions...),
+			SelectedFields: spec.Fields,
+			AdditionalOn:   spec.On,
+			OrderBy:        spec.Order,
+			Many:           true,
+		}
+		for _, sub := range spec.SubRelations {
+			childJoin, err := a.resolveChildRelation(ctx, db, childCfg, alias, sub.Name, sub)
+			if err != nil {
+				return nil, err
+			}
+			if childJoin != nil {
+				manyJoin.NestedJoins = append(manyJoin.NestedJoins, childJoin)
+			}
+		}
+		for _, nestedKey := range nestedKeys {
+			parts := strings.Split(requested[nestedKey].Name, ".")
+			if len(parts) < 2 {
+				continue
+			}
+			childSpec := relationSpecForPath(parts[1:], requested[nestedKey])
+			childJoin, err := a.resolveChildRelation(ctx, db, childCfg, alias, parts[1], childSpec)
+			if err != nil {
+				return nil, err
+			}
+			if childJoin != nil {
+				manyJoin.NestedJoins = append(manyJoin.NestedJoins, childJoin)
+				resolved[nestedKey] = true
+			}
+		}
+		joins = append(joins, manyJoin)
+		if wanted {
+			resolved[strings.ToLower(spec.Name)] = true
+		}
+	}
+	if err := reverseRows.Err(); err != nil {
+		return nil, err
+	}
 
 	for name := range requested {
 		if !resolved[name] {
@@ -792,6 +903,88 @@ func (a *PostgresAdapter) resolveRelationJoins(ctx context.Context, db *sql.DB, 
 	return joins, nil
 }
 
+var safeRelationPredicate = regexp.MustCompile(`(?i)^\s*(?:"?[a-z_][a-z0-9_]*"?\.)?"?[a-z_][a-z0-9_]*"?\s*(?:=|<>|!=|<=|>=|<|>|LIKE|ILIKE|IS\s+NULL|IS\s+NOT\s+NULL)\s*(?:TRUE|FALSE|NULL|-?[0-9]+(?:\.[0-9]+)?|'[^']*'|(?:"?[a-z_][a-z0-9_]*"?\.)?"?[a-z_][a-z0-9_]*"?)?\s*$`)
+
+func validateRelationSpecPredicates(spec query.RelationSpec) error {
+	for _, predicate := range append(append([]string{}, spec.Conditions...), spec.On...) {
+		if !safeRelationPredicate.MatchString(predicate) {
+			return fmt.Errorf("unsafe relation predicate %q; use one simple identifier/operator/literal predicate per entry", predicate)
+		}
+	}
+	for _, child := range spec.SubRelations {
+		if err := validateRelationSpecPredicates(child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *PostgresAdapter) resolveMetadataColumn(ctx context.Context, db *sql.DB, modelID, fieldID string) (string, error) {
+	fieldID = strings.TrimSpace(fieldID)
+	if fieldID != "" {
+		var column sql.NullString
+		err := db.QueryRowContext(ctx, `
+			SELECT COALESCE(NULLIF(column_name, ''), json_field)
+			FROM metadata_catalog.data_models
+			WHERE model_id = $1
+			  AND (id = $2 OR column_name = $2 OR json_field = $2 OR ref_name = $2)
+			ORDER BY CASE WHEN id = $2 THEN 0 ELSE 1 END
+			LIMIT 1
+		`, modelID, fieldID).Scan(&column)
+		if err == nil && column.Valid && strings.TrimSpace(column.String) != "" {
+			return strings.TrimSpace(column.String), nil
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+		// Backward compatibility: catalogs commonly store the physical column
+		// directly even if there is no separate DataModel row for it.
+		return fieldID, nil
+	}
+
+	var primaryKey sql.NullString
+	err := db.QueryRowContext(ctx, `
+		SELECT COALESCE(NULLIF(column_name, ''), json_field)
+		FROM metadata_catalog.data_models
+		WHERE model_id = $1 AND is_primary_key = TRUE
+		ORDER BY id
+		LIMIT 1
+	`, modelID).Scan(&primaryKey)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	if primaryKey.Valid && strings.TrimSpace(primaryKey.String) != "" {
+		return strings.TrimSpace(primaryKey.String), nil
+	}
+	return "id", nil
+}
+
+func findRequestedRelation(requested map[string]query.RelationSpec, names ...string) (string, query.RelationSpec, bool) {
+	for _, name := range names {
+		if spec, ok := requested[strings.ToLower(name)]; ok {
+			return spec.Name, spec, true
+		}
+	}
+	return "", query.RelationSpec{}, false
+}
+
+func pluralRelationName(name string) string {
+	if name == "" {
+		return "Relations"
+	}
+	lower := strings.ToLower(name)
+	if strings.HasSuffix(lower, "y") && len(name) > 1 {
+		prev := lower[len(lower)-2]
+		if !strings.ContainsRune("aeiou", rune(prev)) {
+			return name[:len(name)-1] + "ies"
+		}
+	}
+	if strings.HasSuffix(lower, "s") || strings.HasSuffix(lower, "x") || strings.HasSuffix(lower, "ch") || strings.HasSuffix(lower, "sh") {
+		return name + "es"
+	}
+	return name + "s"
+}
+
 func (a *PostgresAdapter) resolveChildRelation(ctx context.Context, db *sql.DB, parentCfg *modelConfigRow, parentAlias, childName string, spec query.RelationSpec) (*relationJoin, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT column_name, json_field, orbital_reference_model_id, orbital_reference_field_id, orbital_reference_validation, reference, ref_name
@@ -799,6 +992,7 @@ func (a *PostgresAdapter) resolveChildRelation(ctx context.Context, db *sql.DB, 
 		WHERE model_id = $1
 		  AND is_orbital_reference = TRUE
 		  AND COALESCE(status, 'active') = 'active'
+		ORDER BY id, column_name
 	`, parentCfg.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed loading orbital references for parent model '%s': %w", parentCfg.ID, err)
@@ -853,20 +1047,9 @@ func (a *PostgresAdapter) resolveChildRelation(ctx context.Context, db *sql.DB, 
 		if sourceColumn == "" {
 			sourceColumn = jsonField.String
 		}
-		targetColumn := "id"
-		if targetFieldID.Valid && strings.TrimSpace(targetFieldID.String) != "" {
-			targetColumn = targetFieldID.String
-		} else {
-			var pkCol sql.NullString
-			_ = db.QueryRowContext(ctx, `
-				SELECT COALESCE(column_name, json_field)
-				FROM metadata_catalog.data_models
-				WHERE model_id = $1 AND is_primary_key = TRUE
-				LIMIT 1
-			`, targetCfg.ID).Scan(&pkCol)
-			if pkCol.Valid && strings.TrimSpace(pkCol.String) != "" {
-				targetColumn = strings.TrimSpace(pkCol.String)
-			}
+		targetColumn, err := a.resolveMetadataColumn(ctx, db, targetCfg.ID, targetFieldID.String)
+		if err != nil {
+			return nil, err
 		}
 
 		alias := parentAlias + "__" + strings.ToLower(baseRelName)
@@ -876,7 +1059,7 @@ func (a *PostgresAdapter) resolveChildRelation(ctx context.Context, db *sql.DB, 
 			conditions = append(conditions, fmt.Sprintf("COALESCE(%s.is_active, TRUE) = TRUE", quoteIdent(alias)))
 		}
 
-		return &relationJoin{
+		join := &relationJoin{
 			Name:             baseRelName,
 			SourceTable:      parentAlias,
 			ParentAlias:      parentAlias,
@@ -889,10 +1072,33 @@ func (a *PostgresAdapter) resolveChildRelation(ctx context.Context, db *sql.DB, 
 			AdditionalOn:     spec.On,
 			OrderBy:          spec.Order,
 			LoadWithChildren: spec.LoadWithChildren,
-		}, nil
+		}
+		for _, sub := range spec.SubRelations {
+			childJoin, err := a.resolveChildRelation(ctx, db, targetCfg, alias, sub.Name, sub)
+			if err != nil {
+				return nil, err
+			}
+			if childJoin != nil {
+				join.NestedJoins = append(join.NestedJoins, childJoin)
+			}
+		}
+		return join, nil
 	}
 
 	return nil, fmt.Errorf("child relation '%s' is not available on model '%s': no matching orbital reference found", childName, parentCfg.ID)
+}
+
+func relationSpecForPath(parts []string, leaf query.RelationSpec) query.RelationSpec {
+	if len(parts) == 0 {
+		return leaf
+	}
+	root := query.RelationSpec{Name: parts[0], LoadWithChildren: true}
+	if len(parts) == 1 {
+		leaf.Name = parts[0]
+		return leaf
+	}
+	root.SubRelations = []query.RelationSpec{relationSpecForPath(parts[1:], leaf)}
+	return root
 }
 
 func relationRequestMap(q query.Query) map[string]query.RelationSpec {
@@ -1102,10 +1308,18 @@ func (a *PostgresAdapter) Create(ctx context.Context, ref model.ModelRef, data m
 
 // Find queries PostgreSQL.
 func (a *PostgresAdapter) Find(ctx context.Context, ref model.ModelRef, q query.Query) ([]map[string]any, int64, error) {
+	q = q.EnsureDebugTrace()
+	started := time.Now()
 	tableName := a.resolveTableName(ref)
 	db, _ := a.getDB(ctx)
 	if db == nil {
+		if q.Debug {
+			log.Printf("[Query Debug][%s][PostgreSQL] phase=backend table=%s backend=offline-mock", q.DebugTraceID, tableName)
+		}
 		if len(q.Relations) > 0 || len(q.RelationSpecs) > 0 {
+			if q.Debug {
+				log.Printf("[Query Debug][%s][PostgreSQL] phase=error duration=%s error=%q", q.DebugTraceID, time.Since(started), "relations require live PostgreSQL metadata")
+			}
 			return nil, 0, fmt.Errorf("relations require live PostgreSQL metadata; no database connection is available")
 		}
 		a.mu.RLock()
@@ -1119,24 +1333,53 @@ func (a *PostgresAdapter) Find(ctx context.Context, ref model.ModelRef, q query.
 			}
 			results = append(results, cp)
 		}
+		if q.Debug {
+			log.Printf("[Query Debug][%s][PostgreSQL] phase=complete backend=offline-mock duration=%s rows=%d", q.DebugTraceID, time.Since(started), len(results))
+		}
 		return results, int64(len(results)), nil
 	}
 
 	relationJoins, err := a.resolveRelationJoins(ctx, db, ref, tableName, q)
 	if err != nil {
+		if q.Debug {
+			log.Printf("[Query Debug][%s][PostgreSQL] phase=relation-resolution-error duration=%s error=%q", q.DebugTraceID, time.Since(started), err)
+		}
 		return nil, 0, err
+	}
+	if q.Debug {
+		debugPostgresRelationJoins(q, "", relationJoins)
 	}
 
 	sqlStr, args := a.queryBuilder.BuildSelectWithRelations(tableName, q, relationJoins)
+	if q.Debug {
+		relationModes := make([]string, 0, len(relationJoins))
+		for _, relation := range relationJoins {
+			mode := "object"
+			if relation.Many {
+				mode = "array"
+			}
+			relationModes = append(relationModes, fmt.Sprintf("%s:%s", relation.Name, mode))
+		}
+		log.Printf("[Query Debug][%s][PostgreSQL] phase=compiled table=%s relations=%v sql=%s args=%v", q.DebugTraceID, tableName, relationModes, sqlStr, q.DebugArguments(args))
+	}
 	rows, err := db.QueryContext(ctx, sqlStr, args...)
 	if err != nil {
+		if q.Debug {
+			log.Printf("[Query Debug][%s][PostgreSQL] phase=execution-error duration=%s error=%q", q.DebugTraceID, time.Since(started), err)
+		}
 		return nil, 0, err
 	}
 	defer rows.Close()
 
 	cols, err := rows.Columns()
 	if err != nil {
+		if q.Debug {
+			log.Printf("[Query Debug][%s][PostgreSQL] phase=column-error duration=%s error=%q", q.DebugTraceID, time.Since(started), err)
+		}
 		return nil, 0, err
+	}
+	if q.Debug {
+		log.Printf("[Query Debug][%s][PostgreSQL] phase=scanning columns=%v", q.DebugTraceID, cols)
 	}
 
 	var results []map[string]any
@@ -1147,6 +1390,9 @@ func (a *PostgresAdapter) Find(ctx context.Context, ref model.ModelRef, q query.
 			columnPointers[i] = &columns[i]
 		}
 		if err := rows.Scan(columnPointers...); err != nil {
+			if q.Debug {
+				log.Printf("[Query Debug][%s][PostgreSQL] phase=scan-error row=%d duration=%s error=%q", q.DebugTraceID, len(results)+1, time.Since(started), err)
+			}
 			return nil, 0, err
 		}
 		rowMap := make(map[string]any)
@@ -1156,8 +1402,55 @@ func (a *PostgresAdapter) Find(ctx context.Context, ref model.ModelRef, q query.
 		}
 		results = append(results, rowMap)
 	}
+	if err := rows.Err(); err != nil {
+		if q.Debug {
+			log.Printf("[Query Debug][%s][PostgreSQL] phase=cursor-error rows=%d duration=%s error=%q", q.DebugTraceID, len(results), time.Since(started), err)
+		}
+		return nil, 0, err
+	}
+	total := int64(len(results))
+	if q.CountTotal {
+		countSQL, countArgs := a.queryBuilder.BuildCountWithRelations(tableName, q, relationJoins)
+		if q.Debug {
+			log.Printf("[Query Debug][%s][PostgreSQL] phase=count-compiled sql=%s args=%v", q.DebugTraceID, countSQL, q.DebugArguments(countArgs))
+		}
+		if err := db.QueryRowContext(ctx, countSQL, countArgs...).Scan(&total); err != nil {
+			return nil, 0, fmt.Errorf("postgres count failed: %w", err)
+		}
+	}
+	if q.Debug {
+		log.Printf("[Query Debug][%s][PostgreSQL] phase=complete duration=%s rows=%d total=%d", q.DebugTraceID, time.Since(started), len(results), total)
+		if elapsed := time.Since(started); q.IsSlow(elapsed) {
+			log.Printf("[Query Debug][%s][PostgreSQL] phase=slow-query duration=%s threshold_ms=%d", q.DebugTraceID, elapsed, q.SlowQueryThresholdMS)
+		}
+	}
 
-	return results, int64(len(results)), nil
+	return results, total, nil
+}
+
+func debugPostgresRelationJoins(q query.Query, parentPath string, joins []relationJoin) {
+	for _, relation := range joins {
+		path := relation.Name
+		if parentPath != "" {
+			path = parentPath + "." + relation.Name
+		}
+		cardinality := "object"
+		if relation.Many {
+			cardinality = "array"
+		}
+		log.Printf("[Query Debug][%s][PostgreSQL] phase=relation-resolved path=%s cardinality=%s source=%s.%s target=%s.%s alias=%s selected_fields=%v conditions=%v additional_on=%v order=%v nested=%d",
+			q.DebugTraceID, path, cardinality, relation.SourceTable, relation.SourceColumn, relation.TargetTable, relation.TargetColumn, relation.Alias,
+			relation.SelectedFields, q.DebugValue(relation.Conditions, len(relation.Conditions)), q.DebugValue(relation.AdditionalOn, len(relation.AdditionalOn)), relation.OrderBy, len(relation.NestedJoins))
+		if len(relation.NestedJoins) > 0 {
+			children := make([]relationJoin, 0, len(relation.NestedJoins))
+			for _, child := range relation.NestedJoins {
+				if child != nil {
+					children = append(children, *child)
+				}
+			}
+			debugPostgresRelationJoins(q, path, children)
+		}
+	}
 }
 
 func normalizePostgresValue(val any) any {
@@ -1182,15 +1475,29 @@ func normalizePostgresValue(val any) any {
 
 // FindOne finds a record by ID.
 func (a *PostgresAdapter) FindOne(ctx context.Context, ref model.ModelRef, id any) (map[string]any, error) {
+	return a.FindOneWithQuery(ctx, ref, id, query.NewQuery())
+}
+
+// FindOneWithQuery retrieves one row while preserving relation requests. This
+// is the single-record counterpart of Find and is what allows callers to load
+// orbital objects and reverse-reference arrays for a primary-key lookup.
+func (a *PostgresAdapter) FindOneWithQuery(ctx context.Context, ref model.ModelRef, id any, q query.Query) (map[string]any, error) {
 	tableName := a.resolveTableName(ref)
 	idStr := fmt.Sprintf("%v", id)
+	primaryKey := ref.PrimaryKey
+	if strings.TrimSpace(primaryKey) == "" {
+		primaryKey = "id"
+	}
 
 	db, _ := a.getDB(ctx)
 	if db == nil {
+		if len(q.Relations) > 0 || len(q.RelationSpecs) > 0 {
+			return nil, fmt.Errorf("relations require live PostgreSQL metadata; no database connection is available")
+		}
 		a.mu.RLock()
 		defer a.mu.RUnlock()
 		for _, r := range a.mockStore[tableName] {
-			if fmt.Sprintf("%v", r["id"]) == idStr {
+			if fmt.Sprintf("%v", r[primaryKey]) == idStr {
 				cp := make(map[string]any)
 				for k, v := range r {
 					cp[k] = v
@@ -1201,7 +1508,7 @@ func (a *PostgresAdapter) FindOne(ctx context.Context, ref model.ModelRef, id an
 		return nil, fmt.Errorf("record '%v' not found", id)
 	}
 
-	q := query.NewQuery().Where("id", query.OpEq, id).LimitOffset(1, 0)
+	q = q.Where(primaryKey, query.OpEq, id).LimitOffset(1, 0)
 	results, _, err := a.Find(ctx, ref, q)
 	if err != nil {
 		return nil, err
@@ -1448,6 +1755,10 @@ func (t *PostgresTransaction) Find(ctx context.Context, model model.ModelRef, q 
 
 func (t *PostgresTransaction) FindOne(ctx context.Context, model model.ModelRef, id any) (map[string]any, error) {
 	return t.adapter.FindOne(ctx, model, id)
+}
+
+func (t *PostgresTransaction) FindOneWithQuery(ctx context.Context, model model.ModelRef, id any, q query.Query) (map[string]any, error) {
+	return t.adapter.FindOneWithQuery(ctx, model, id, q)
 }
 
 func (t *PostgresTransaction) Update(ctx context.Context, model model.ModelRef, id any, data map[string]any) (map[string]any, error) {
