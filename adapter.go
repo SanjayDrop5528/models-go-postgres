@@ -2077,3 +2077,7 @@ func (t *PostgresTransaction) Rollback(ctx context.Context) error {
 	}
 	return nil
 }
+
+func (t *PostgresTransaction) Tx() *sql.Tx {
+	return t.tx
+}
