@@ -3,6 +3,7 @@ module github.com/SanjayDrop5528/models-go-postgres
 go 1.26.2
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/SanjayDrop5528/models-go-engine v0.0.0
 	github.com/jackc/pgx/v5 v5.10.0
 )

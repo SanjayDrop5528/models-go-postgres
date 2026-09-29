@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -52,6 +53,7 @@ type PostgresAdapter struct {
 	introspector *Introspector
 	mu           sync.RWMutex
 	mockStore    map[string][]map[string]any
+	ownsDB       bool
 }
 
 // NewPostgresAdapter creates a new PostgreSQL adapter instance.
@@ -70,7 +72,20 @@ func NewPostgresAdapter(dsn string) *PostgresAdapter {
 		ddlGen:       NewDDLGenerator(),
 		queryBuilder: &QueryBuilder{},
 		mockStore:    make(map[string][]map[string]any),
+		ownsDB:       true,
 	}
+}
+
+// NewPostgresAdapterFromDB wraps an existing database/sql pool. The caller
+// retains ownership of the pool, so Close detaches the adapter without closing
+// the shared connection. This is intended for tenant routers and applications
+// that already manage their own pools.
+func NewPostgresAdapterFromDB(db *sql.DB) *PostgresAdapter {
+	a := NewPostgresAdapter("")
+	a.db = db
+	a.ownsDB = false
+	a.introspector = NewIntrospector(db)
+	return a
 }
 
 // WithSchemas configures specific PostgreSQL database schemas for introspection and operations.
@@ -511,7 +526,10 @@ func (a *PostgresAdapter) Close(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.db != nil {
-		err := a.db.Close()
+		var err error
+		if a.ownsDB {
+			err = a.db.Close()
+		}
 		a.db = nil
 		return err
 	}
@@ -1300,10 +1318,15 @@ func (a *PostgresAdapter) Create(ctx context.Context, ref model.ModelRef, data m
 	}
 
 	sqlStr, args := a.queryBuilder.BuildInsert(tableName, data)
-	if _, err := db.ExecContext(ctx, sqlStr, args...); err != nil {
+	rows, err := db.QueryContext(ctx, sqlStr, args...)
+	if err != nil {
 		return nil, fmt.Errorf("failed executing insert into PostgreSQL table '%s': %w", tableName, err)
 	}
-	return res, nil
+	created, err := scanSingleMap(rows)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading inserted PostgreSQL row from '%s': %w", tableName, err)
+	}
+	return created, nil
 }
 
 // Find queries PostgreSQL.
@@ -1473,6 +1496,58 @@ func normalizePostgresValue(val any) any {
 	}
 }
 
+func scanSingleMap(rows *sql.Rows) (map[string]any, error) {
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, sql.ErrNoRows
+	}
+	values := make([]any, len(columns))
+	pointers := make([]any, len(columns))
+	for i := range values {
+		pointers[i] = &values[i]
+	}
+	if err := rows.Scan(pointers...); err != nil {
+		return nil, err
+	}
+	row := make(map[string]any, len(columns))
+	for i, column := range columns {
+		row[column] = normalizePostgresValue(values[i])
+	}
+	return row, rows.Err()
+}
+
+func scanMapRows(rows *sql.Rows) ([]map[string]any, error) {
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]map[string]any, 0)
+	for rows.Next() {
+		values := make([]any, len(columns))
+		pointers := make([]any, len(columns))
+		for i := range values {
+			pointers[i] = &values[i]
+		}
+		if err := rows.Scan(pointers...); err != nil {
+			return nil, err
+		}
+		row := make(map[string]any, len(columns))
+		for i, column := range columns {
+			row[column] = normalizePostgresValue(values[i])
+		}
+		result = append(result, row)
+	}
+	return result, rows.Err()
+}
+
 // FindOne finds a record by ID.
 func (a *PostgresAdapter) FindOne(ctx context.Context, ref model.ModelRef, id any) (map[string]any, error) {
 	return a.FindOneWithQuery(ctx, ref, id, query.NewQuery())
@@ -1523,14 +1598,21 @@ func (a *PostgresAdapter) FindOneWithQuery(ctx context.Context, ref model.ModelR
 func (a *PostgresAdapter) Update(ctx context.Context, ref model.ModelRef, id any, data map[string]any) (map[string]any, error) {
 	tableName := a.resolveTableName(ref)
 	idStr := fmt.Sprintf("%v", id)
+	primaryKey := ref.PrimaryKey
+	if primaryKey == "" {
+		primaryKey = "id"
+	}
+	if !hasMutableFields(data, primaryKey) {
+		return a.FindOne(ctx, ref, id)
+	}
 
 	db, _ := a.getDB(ctx)
 	if db == nil {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		for i, r := range a.mockStore[tableName] {
-			if fmt.Sprintf("%v", r["id"]) == idStr {
-				data["id"] = r["id"]
+			if fmt.Sprintf("%v", r[primaryKey]) == idStr {
+				data[primaryKey] = r[primaryKey]
 				a.mockStore[tableName][i] = data
 				return data, nil
 			}
@@ -1538,24 +1620,38 @@ func (a *PostgresAdapter) Update(ctx context.Context, ref model.ModelRef, id any
 		return nil, fmt.Errorf("record '%v' not found", id)
 	}
 
-	sqlStr, args := a.queryBuilder.BuildUpdate(tableName, id, data)
-	if _, err := db.ExecContext(ctx, sqlStr, args...); err != nil {
+	sqlStr, args := a.queryBuilder.BuildUpdateByKey(tableName, primaryKey, id, data)
+	rows, err := db.QueryContext(ctx, sqlStr, args...)
+	if err != nil {
 		return nil, err
 	}
-	return a.FindOne(ctx, ref, id)
+	return scanSingleMap(rows)
+}
+
+func hasMutableFields(data map[string]any, primaryKey string) bool {
+	for key := range data {
+		if !strings.EqualFold(key, primaryKey) {
+			return true
+		}
+	}
+	return false
 }
 
 // Patch updates specific fields by ID.
 func (a *PostgresAdapter) Patch(ctx context.Context, ref model.ModelRef, id any, data map[string]any) (map[string]any, error) {
 	tableName := a.resolveTableName(ref)
 	idStr := fmt.Sprintf("%v", id)
+	primaryKey := ref.PrimaryKey
+	if primaryKey == "" {
+		primaryKey = "id"
+	}
 
 	db, _ := a.getDB(ctx)
 	if db == nil {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		for i, r := range a.mockStore[tableName] {
-			if fmt.Sprintf("%v", r["id"]) == idStr {
+			if fmt.Sprintf("%v", r[primaryKey]) == idStr {
 				for k, v := range data {
 					a.mockStore[tableName][i][k] = v
 				}
@@ -1572,13 +1668,17 @@ func (a *PostgresAdapter) Patch(ctx context.Context, ref model.ModelRef, id any,
 func (a *PostgresAdapter) Delete(ctx context.Context, ref model.ModelRef, id any) error {
 	tableName := a.resolveTableName(ref)
 	idStr := fmt.Sprintf("%v", id)
+	primaryKey := ref.PrimaryKey
+	if primaryKey == "" {
+		primaryKey = "id"
+	}
 
 	db, _ := a.getDB(ctx)
 	if db == nil {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		for i, r := range a.mockStore[tableName] {
-			if fmt.Sprintf("%v", r["id"]) == idStr {
+			if fmt.Sprintf("%v", r[primaryKey]) == idStr {
 				a.mockStore[tableName] = append(a.mockStore[tableName][:i], a.mockStore[tableName][i+1:]...)
 				return nil
 			}
@@ -1586,7 +1686,7 @@ func (a *PostgresAdapter) Delete(ctx context.Context, ref model.ModelRef, id any
 		return nil
 	}
 
-	sqlStr, args := a.queryBuilder.BuildDelete(tableName, id)
+	sqlStr, args := a.queryBuilder.BuildDeleteByKey(tableName, primaryKey, id)
 	_, err := db.ExecContext(ctx, sqlStr, args...)
 	return err
 }
@@ -1599,7 +1699,11 @@ func (a *PostgresAdapter) Execute(ctx context.Context, req execution.ExecutionRe
 		var paramPlaceholders []string
 		var args []any
 		idx := 1
-		for _, v := range req.Arguments {
+		orderedArgs, err := orderedExecutionArgs(req)
+		if err != nil {
+			return nil, err
+		}
+		for _, v := range orderedArgs {
 			paramPlaceholders = append(paramPlaceholders, fmt.Sprintf("$%d", idx))
 			args = append(args, v)
 			idx++
@@ -1630,7 +1734,11 @@ func (a *PostgresAdapter) Execute(ctx context.Context, req execution.ExecutionRe
 		var paramPlaceholders []string
 		var args []any
 		idx := 1
-		for _, v := range req.Arguments {
+		orderedArgs, err := orderedExecutionArgs(req)
+		if err != nil {
+			return nil, err
+		}
+		for _, v := range orderedArgs {
 			paramPlaceholders = append(paramPlaceholders, fmt.Sprintf("$%d", idx))
 			args = append(args, v)
 			idx++
@@ -1652,7 +1760,11 @@ func (a *PostgresAdapter) Execute(ctx context.Context, req execution.ExecutionRe
 	case operation.OpQuery:
 		if a.db != nil {
 			queryStr := strings.TrimSpace(req.Target)
-			rows, err := a.db.QueryContext(ctx, queryStr)
+			args, err := orderedExecutionArgs(req)
+			if err != nil {
+				return nil, err
+			}
+			rows, err := a.db.QueryContext(ctx, queryStr, args...)
 			if err != nil {
 				return nil, fmt.Errorf("failed to execute preview query: %w", err)
 			}
@@ -1702,7 +1814,11 @@ func (a *PostgresAdapter) Execute(ctx context.Context, req execution.ExecutionRe
 
 	case operation.OpDDL, operation.OpCommand, operation.OpCustom:
 		if a.db != nil {
-			res, err := a.db.ExecContext(ctx, req.Target)
+			args, err := orderedExecutionArgs(req)
+			if err != nil {
+				return nil, err
+			}
+			res, err := a.db.ExecContext(ctx, req.Target, args...)
 			if err != nil {
 				return nil, err
 			}
@@ -1722,6 +1838,58 @@ func (a *PostgresAdapter) Execute(ctx context.Context, req execution.ExecutionRe
 	default:
 		return nil, adapter.ErrOperationNotSupported
 	}
+}
+
+func orderedExecutionArgs(req execution.ExecutionRequest) ([]any, error) {
+	if req.Options != nil {
+		if raw, ok := req.Options["args"]; ok {
+			switch values := raw.(type) {
+			case []any:
+				return values, nil
+			default:
+				value := reflect.ValueOf(raw)
+				if value.IsValid() && (value.Kind() == reflect.Slice || value.Kind() == reflect.Array) {
+					args := make([]any, value.Len())
+					for i := 0; i < value.Len(); i++ {
+						args[i] = value.Index(i).Interface()
+					}
+					return args, nil
+				}
+				return nil, fmt.Errorf("execution option 'args' must be an array")
+			}
+		}
+	}
+	if len(req.Arguments) == 0 {
+		return nil, nil
+	}
+	var names []string
+	if req.Options != nil {
+		if rawOrder, ok := req.Options["parameter_order"]; ok {
+			switch values := rawOrder.(type) {
+			case []string:
+				names = append(names, values...)
+			case []any:
+				for _, value := range values {
+					names = append(names, fmt.Sprint(value))
+				}
+			}
+		}
+	}
+	if len(names) == 0 {
+		for name := range req.Arguments {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+	}
+	args := make([]any, 0, len(names))
+	for _, name := range names {
+		value, ok := req.Arguments[name]
+		if !ok {
+			return nil, fmt.Errorf("execution parameter %q is missing", name)
+		}
+		args = append(args, value)
+	}
+	return args, nil
 }
 
 // Begin starts a new PostgreSQL transaction.
@@ -1746,35 +1914,154 @@ type PostgresTransaction struct {
 }
 
 func (t *PostgresTransaction) Create(ctx context.Context, model model.ModelRef, data map[string]any) (map[string]any, error) {
-	return t.adapter.Create(ctx, model, data)
+	if t.tx == nil {
+		return t.adapter.Create(ctx, model, data)
+	}
+	tableName := t.adapter.resolveTableName(model)
+	sqlText, args := t.adapter.queryBuilder.BuildInsert(tableName, data)
+	rows, err := t.tx.QueryContext(ctx, sqlText, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanSingleMap(rows)
 }
 
 func (t *PostgresTransaction) Find(ctx context.Context, model model.ModelRef, q query.Query) ([]map[string]any, int64, error) {
-	return t.adapter.Find(ctx, model, q)
+	if t.tx == nil {
+		return t.adapter.Find(ctx, model, q)
+	}
+	if len(q.Relations) > 0 || len(q.RelationSpecs) > 0 {
+		return nil, 0, fmt.Errorf("native relation metadata queries are not supported inside PostgresTransaction; use declared engine hydration")
+	}
+	tableName := t.adapter.resolveTableName(model)
+	sqlText, args := t.adapter.queryBuilder.BuildSelect(tableName, q)
+	rows, err := t.tx.QueryContext(ctx, sqlText, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	results, err := scanMapRows(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	total := int64(len(results))
+	if q.CountTotal {
+		countSQL, countArgs := t.adapter.queryBuilder.BuildCountWithRelations(tableName, q, nil)
+		if err := t.tx.QueryRowContext(ctx, countSQL, countArgs...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+	}
+	return results, total, nil
 }
 
 func (t *PostgresTransaction) FindOne(ctx context.Context, model model.ModelRef, id any) (map[string]any, error) {
-	return t.adapter.FindOne(ctx, model, id)
+	return t.FindOneWithQuery(ctx, model, id, query.NewQuery())
 }
 
 func (t *PostgresTransaction) FindOneWithQuery(ctx context.Context, model model.ModelRef, id any, q query.Query) (map[string]any, error) {
-	return t.adapter.FindOneWithQuery(ctx, model, id, q)
+	if t.tx == nil {
+		return t.adapter.FindOneWithQuery(ctx, model, id, q)
+	}
+	primaryKey := model.PrimaryKey
+	if primaryKey == "" {
+		primaryKey = "id"
+	}
+	q = q.Where(primaryKey, query.OpEq, id).LimitOffset(1, 0)
+	rows, _, err := t.Find(ctx, model, q)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("record '%v' not found", id)
+	}
+	return rows[0], nil
 }
 
 func (t *PostgresTransaction) Update(ctx context.Context, model model.ModelRef, id any, data map[string]any) (map[string]any, error) {
-	return t.adapter.Update(ctx, model, id, data)
+	if t.tx == nil {
+		return t.adapter.Update(ctx, model, id, data)
+	}
+	primaryKey := model.PrimaryKey
+	if primaryKey == "" {
+		primaryKey = "id"
+	}
+	if !hasMutableFields(data, primaryKey) {
+		return t.FindOne(ctx, model, id)
+	}
+	sqlText, args := t.adapter.queryBuilder.BuildUpdateByKey(t.adapter.resolveTableName(model), primaryKey, id, data)
+	rows, err := t.tx.QueryContext(ctx, sqlText, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanSingleMap(rows)
 }
 
 func (t *PostgresTransaction) Patch(ctx context.Context, model model.ModelRef, id any, data map[string]any) (map[string]any, error) {
-	return t.adapter.Patch(ctx, model, id, data)
+	return t.Update(ctx, model, id, data)
 }
 
 func (t *PostgresTransaction) Delete(ctx context.Context, model model.ModelRef, id any) error {
-	return t.adapter.Delete(ctx, model, id)
+	if t.tx == nil {
+		return t.adapter.Delete(ctx, model, id)
+	}
+	primaryKey := model.PrimaryKey
+	if primaryKey == "" {
+		primaryKey = "id"
+	}
+	sqlText, args := t.adapter.queryBuilder.BuildDeleteByKey(t.adapter.resolveTableName(model), primaryKey, id)
+	_, err := t.tx.ExecContext(ctx, sqlText, args...)
+	return err
 }
 
 func (t *PostgresTransaction) Execute(ctx context.Context, req execution.ExecutionRequest) (*execution.ExecutionResult, error) {
-	return t.adapter.Execute(ctx, req)
+	if t.tx == nil {
+		return t.adapter.Execute(ctx, req)
+	}
+	args, err := orderedExecutionArgs(req)
+	if err != nil {
+		return nil, err
+	}
+	switch req.Operation {
+	case operation.OpQuery:
+		rows, err := t.tx.QueryContext(ctx, strings.TrimSpace(req.Target), args...)
+		if err != nil {
+			return nil, err
+		}
+		data, err := scanMapRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		return &execution.ExecutionResult{Data: data, Status: "SUCCESS", Metadata: map[string]any{"count": len(data)}}, nil
+	case operation.OpFunction:
+		placeholders := make([]string, len(args))
+		for i := range args {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+		}
+		statement := fmt.Sprintf("SELECT %s(%s);", req.Target, strings.Join(placeholders, ", "))
+		var result any
+		if err := t.tx.QueryRowContext(ctx, statement, args...).Scan(&result); err != nil {
+			return nil, err
+		}
+		return &execution.ExecutionResult{Data: normalizePostgresValue(result), Status: "SUCCESS"}, nil
+	case operation.OpProcedure:
+		placeholders := make([]string, len(args))
+		for i := range args {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+		}
+		statement := fmt.Sprintf("CALL %s(%s);", req.Target, strings.Join(placeholders, ", "))
+		if _, err := t.tx.ExecContext(ctx, statement, args...); err != nil {
+			return nil, err
+		}
+		return &execution.ExecutionResult{Status: "SUCCESS"}, nil
+	case operation.OpDDL, operation.OpCommand, operation.OpCustom:
+		result, err := t.tx.ExecContext(ctx, req.Target, args...)
+		if err != nil {
+			return nil, err
+		}
+		affected, _ := result.RowsAffected()
+		return &execution.ExecutionResult{RowsAffected: affected, Status: "SUCCESS"}, nil
+	default:
+		return nil, adapter.ErrOperationNotSupported
+	}
 }
 
 func (t *PostgresTransaction) Commit(ctx context.Context) error {

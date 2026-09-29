@@ -56,6 +56,35 @@ func TestBuildCountWithRelationsRemovesPagination(t *testing.T) {
 	}
 }
 
+func TestBuildUpdateAndDeleteUseRuntimePrimaryKey(t *testing.T) {
+	builder := &postgres.QueryBuilder{}
+	updateSQL, updateArgs := builder.BuildUpdateByKey("shared.settings", "code", "fleet", map[string]any{
+		"code": "must-not-be-updated", "value": "enabled", "description": "Fleet feature",
+	})
+	wantUpdate := `UPDATE "shared"."settings" SET "description" = $1, "value" = $2 WHERE "code" = $3 RETURNING *;`
+	if updateSQL != wantUpdate {
+		t.Fatalf("unexpected update SQL:\n%s\nwant:\n%s", updateSQL, wantUpdate)
+	}
+	if len(updateArgs) != 3 || updateArgs[0] != "Fleet feature" || updateArgs[1] != "enabled" || updateArgs[2] != "fleet" {
+		t.Fatalf("unexpected update arguments: %#v", updateArgs)
+	}
+
+	deleteSQL, deleteArgs := builder.BuildDeleteByKey("shared.settings", "code", "fleet")
+	wantDelete := `DELETE FROM "shared"."settings" WHERE "code" = $1;`
+	if deleteSQL != wantDelete || len(deleteArgs) != 1 || deleteArgs[0] != "fleet" {
+		t.Fatalf("unexpected delete: %s %#v", deleteSQL, deleteArgs)
+	}
+}
+
+func TestBuildInsertSupportsDatabaseDefaults(t *testing.T) {
+	builder := &postgres.QueryBuilder{}
+	sqlText, args := builder.BuildInsert("shared.settings", nil)
+	want := `INSERT INTO "shared"."settings" DEFAULT VALUES RETURNING *;`
+	if sqlText != want || len(args) != 0 {
+		t.Fatalf("unexpected default insert: %s %#v", sqlText, args)
+	}
+}
+
 func TestPostgres_DDL_RenameColumn(t *testing.T) {
 	gen := postgres.NewDDLGenerator()
 

@@ -11,8 +11,10 @@ package postgres
 
 import (
 	"fmt"
-	"github.com/SanjayDrop5528/models-go-engine/query"
+	"sort"
 	"strings"
+
+	"github.com/SanjayDrop5528/models-go-engine/query"
 )
 
 // QueryBuilder compiles query.Query into parameterized PostgreSQL SQL queries.
@@ -319,12 +321,21 @@ func (b *QueryBuilder) buildRelationJoinSQL(rel relationJoin) string {
 // When can it be used:
 // Can be used whenever inserting a new row into a PostgreSQL table.
 func (b *QueryBuilder) BuildInsert(table string, data map[string]any) (string, []any) {
+	if len(data) == 0 {
+		return fmt.Sprintf("INSERT INTO %s DEFAULT VALUES RETURNING *;", quoteIdent(table)), nil
+	}
 	var cols []string
 	var placeholders []string
 	var args []any
 
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
 	idx := 1
-	for k, v := range data {
+	for _, k := range keys {
+		v := data[k]
 		cols = append(cols, quoteIdent(k))
 		placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
 		args = append(args, v)
@@ -351,12 +362,29 @@ func (b *QueryBuilder) BuildInsert(table string, data map[string]any) (string, [
 // When can it be used:
 // Can be used whenever updating an existing row by ID in PostgreSQL.
 func (b *QueryBuilder) BuildUpdate(table string, id any, data map[string]any) (string, []any) {
+	return b.BuildUpdateByKey(table, "id", id, data)
+}
+
+// BuildUpdateByKey compiles an UPDATE using the runtime model's actual primary
+// key rather than assuming every table uses an `id` column.
+func (b *QueryBuilder) BuildUpdateByKey(table, primaryKey string, id any, data map[string]any) (string, []any) {
 	var setClauses []string
 	var args []any
+	if strings.TrimSpace(primaryKey) == "" {
+		primaryKey = "id"
+	}
 
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		if !strings.EqualFold(key, primaryKey) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
 	idx := 1
-	for k, v := range data {
-		if k == "id" {
+	for _, k := range keys {
+		v := data[k]
+		if strings.EqualFold(k, primaryKey) {
 			continue
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", quoteIdent(k), idx))
@@ -367,9 +395,10 @@ func (b *QueryBuilder) BuildUpdate(table string, id any, data map[string]any) (s
 	args = append(args, id)
 	idPlaceholder := fmt.Sprintf("$%d", idx)
 
-	sql := fmt.Sprintf("UPDATE %s SET %s WHERE \"id\" = %s RETURNING *;",
+	sql := fmt.Sprintf("UPDATE %s SET %s WHERE %s = %s RETURNING *;",
 		quoteIdent(table),
 		strings.Join(setClauses, ", "),
+		quoteIdent(primaryKey),
 		idPlaceholder,
 	)
 
@@ -387,7 +416,15 @@ func (b *QueryBuilder) BuildUpdate(table string, id any, data map[string]any) (s
 // When can it be used:
 // Can be used whenever deleting a row by its primary key ID in PostgreSQL.
 func (b *QueryBuilder) BuildDelete(table string, id any) (string, []any) {
-	sql := fmt.Sprintf("DELETE FROM %s WHERE \"id\" = $1;", quoteIdent(table))
+	return b.BuildDeleteByKey(table, "id", id)
+}
+
+// BuildDeleteByKey compiles a DELETE using the supplied runtime primary key.
+func (b *QueryBuilder) BuildDeleteByKey(table, primaryKey string, id any) (string, []any) {
+	if strings.TrimSpace(primaryKey) == "" {
+		primaryKey = "id"
+	}
+	sql := fmt.Sprintf("DELETE FROM %s WHERE %s = $1;", quoteIdent(table), quoteIdent(primaryKey))
 	return sql, []any{id}
 }
 
