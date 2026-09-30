@@ -194,10 +194,6 @@ func (a *PostgresAdapter) createDatabaseIfNotExists(ctx context.Context) error {
 
 // getDB lazily and thread-safely connects to the live PostgreSQL database when a DSN is provided.
 func (a *PostgresAdapter) getDB(ctx context.Context) (*sql.DB, error) {
-	if strings.TrimSpace(a.dsn) == "" {
-		return nil, nil // Offline mock fallback mode
-	}
-
 	a.mu.RLock()
 	if a.db != nil {
 		db := a.db
@@ -205,6 +201,10 @@ func (a *PostgresAdapter) getDB(ctx context.Context) (*sql.DB, error) {
 		return db, nil
 	}
 	a.mu.RUnlock()
+
+	if strings.TrimSpace(a.dsn) == "" {
+		return nil, nil // Offline mock fallback mode
+	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
