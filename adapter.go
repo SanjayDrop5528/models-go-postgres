@@ -293,6 +293,7 @@ func (a *PostgresAdapter) ensureMetadataTablesInternal(ctx context.Context, db *
 		id VARCHAR(255) PRIMARY KEY,
 		model_id VARCHAR(255) NOT NULL,
 		column_name VARCHAR(255),
+		is_encrypted BOOLEAN DEFAULT FALSE,
 		json_field VARCHAR(255),
 		ref_name VARCHAR(255),
 		description TEXT,
@@ -357,6 +358,9 @@ func (a *PostgresAdapter) ensureMetadataTablesInternal(ctx context.Context, db *
 	}
 	if _, err := db.ExecContext(ctx, createDMTable); err != nil {
 		return fmt.Errorf("failed to create 'metadata_catalog.data_models' table: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE metadata_catalog.data_models ADD COLUMN IF NOT EXISTS is_encrypted BOOLEAN DEFAULT FALSE`); err != nil {
+		return fmt.Errorf("failed to add data_models.is_encrypted: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `ALTER TABLE metadata_catalog.data_models ADD COLUMN IF NOT EXISTS load_with_children BOOLEAN DEFAULT FALSE`); err != nil {
 		return fmt.Errorf("failed to add data_models.load_with_children: %w", err)
