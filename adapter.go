@@ -251,7 +251,6 @@ func (a *PostgresAdapter) getDB(ctx context.Context) (*sql.DB, error) {
 	log.Printf("[PostgreSQL] ✔ Connected successfully to live PostgreSQL database!")
 	a.db = db
 	a.introspector = NewIntrospector(db)
-	_ = a.ensureMetadataTablesInternal(ctx, db)
 	return a.db, nil
 }
 
