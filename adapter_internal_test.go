@@ -1,13 +1,18 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"regexp"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/SanjayDrop5528/models-go-engine/execution"
 	"github.com/SanjayDrop5528/models-go-engine/model"
+	"github.com/SanjayDrop5528/models-go-engine/query"
 )
 
 func TestOrderedExecutionArgs(t *testing.T) {
@@ -82,3 +87,47 @@ func TestTransactionCreateUsesTransactionAndReturnsDatabaseRow(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSlowQueryLogsInColor(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer database.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT "widgets".* FROM "widgets"`)).
+		WillDelayFor(10 * time.Millisecond).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow("1", "widget1"))
+
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+	t.Cleanup(func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	})
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+
+	adapter := NewPostgresAdapterFromDB(database)
+	q := query.New()
+	q.SlowQueryThresholdMS = 1 // 1ms threshold
+
+	_, _, err = adapter.Find(context.Background(), model.NewModelRef("widget", "Widget", "widgets", "id"), q)
+	if err != nil {
+		t.Fatalf("Find failed: %v", err)
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, ansiColorYellowBold) {
+		t.Fatalf("expected yellow color code in slow query log, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "phase=slow-query") {
+		t.Fatalf("expected phase=slow-query in log, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, ansiColorReset) {
+		t.Fatalf("expected reset color code in slow query log, got %q", logOutput)
+	}
+}
+

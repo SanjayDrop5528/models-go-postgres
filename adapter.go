@@ -43,6 +43,11 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+const (
+	ansiColorReset      = "\033[0m"
+	ansiColorYellowBold = "\033[1;33m"
+)
+
 // PostgresAdapter implements the core Adapter interface for PostgreSQL.
 type PostgresAdapter struct {
 	dsn          string
@@ -1359,8 +1364,16 @@ func (a *PostgresAdapter) Find(ctx context.Context, ref model.ModelRef, q query.
 			}
 			results = append(results, cp)
 		}
+		elapsed := time.Since(started)
 		if q.Debug {
-			log.Printf("[Query Debug][%s][PostgreSQL] phase=complete backend=offline-mock duration=%s rows=%d", q.DebugTraceID, time.Since(started), len(results))
+			log.Printf("[Query Debug][%s][PostgreSQL] phase=complete backend=offline-mock duration=%s rows=%d", q.DebugTraceID, elapsed, len(results))
+		}
+		if q.IsSlow(elapsed) {
+			traceID := q.DebugTraceID
+			if traceID == "" {
+				traceID = "slow"
+			}
+			log.Printf("%s[Query Debug][%s][PostgreSQL] phase=slow-query duration=%s threshold_ms=%d%s", ansiColorYellowBold, traceID, elapsed, q.SlowQueryThresholdMS, ansiColorReset)
 		}
 		return results, int64(len(results)), nil
 	}
@@ -1444,11 +1457,16 @@ func (a *PostgresAdapter) Find(ctx context.Context, ref model.ModelRef, q query.
 			return nil, 0, fmt.Errorf("postgres count failed: %w", err)
 		}
 	}
+	elapsed := time.Since(started)
 	if q.Debug {
-		log.Printf("[Query Debug][%s][PostgreSQL] phase=complete duration=%s rows=%d total=%d", q.DebugTraceID, time.Since(started), len(results), total)
-		if elapsed := time.Since(started); q.IsSlow(elapsed) {
-			log.Printf("[Query Debug][%s][PostgreSQL] phase=slow-query duration=%s threshold_ms=%d", q.DebugTraceID, elapsed, q.SlowQueryThresholdMS)
+		log.Printf("[Query Debug][%s][PostgreSQL] phase=complete duration=%s rows=%d total=%d", q.DebugTraceID, elapsed, len(results), total)
+	}
+	if q.IsSlow(elapsed) {
+		traceID := q.DebugTraceID
+		if traceID == "" {
+			traceID = "slow"
 		}
+		log.Printf("%s[Query Debug][%s][PostgreSQL] phase=slow-query duration=%s threshold_ms=%d%s", ansiColorYellowBold, traceID, elapsed, q.SlowQueryThresholdMS, ansiColorReset)
 	}
 
 	return results, total, nil
