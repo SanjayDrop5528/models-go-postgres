@@ -1781,9 +1781,13 @@ func (a *PostgresAdapter) Execute(ctx context.Context, req execution.ExecutionRe
 	case operation.OpQuery:
 		if a.db != nil {
 			queryStr := strings.TrimSpace(req.Target)
-			args, err := orderedExecutionArgs(req)
-			if err != nil {
-				return nil, err
+			var args []any
+			if strings.Contains(queryStr, "$") {
+				var err error
+				args, err = orderedExecutionArgs(req)
+				if err != nil {
+					return nil, err
+				}
 			}
 			rows, err := a.db.QueryContext(ctx, queryStr, args...)
 			if err != nil {
@@ -2043,7 +2047,16 @@ func (t *PostgresTransaction) Execute(ctx context.Context, req execution.Executi
 	}
 	switch req.Operation {
 	case operation.OpQuery:
-		rows, err := t.tx.QueryContext(ctx, strings.TrimSpace(req.Target), args...)
+		queryStr := strings.TrimSpace(req.Target)
+		var args []any
+		if strings.Contains(queryStr, "$") {
+			var err error
+			args, err = orderedExecutionArgs(req)
+			if err != nil {
+				return nil, err
+			}
+		}
+		rows, err := t.tx.QueryContext(ctx, queryStr, args...)
 		if err != nil {
 			return nil, err
 		}
