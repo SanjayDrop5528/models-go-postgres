@@ -64,6 +64,9 @@ func (c *PostgresDataSetCompiler) Compile(ctx context.Context, ast *planner.Quer
 	execQuery := c.buildSelectSQL(ast, false, false)
 	refQuery := c.buildSelectSQL(ast, true, false)
 	routineQuery := c.buildSelectSQL(ast, false, true)
+	if saveMode != domain.SaveModeQuery {
+		refQuery = routineQuery
+	}
 	baseSchema := ds.BaseCollection.Schema
 	if baseSchema == "" {
 		baseSchema = "metadata_catalog"
@@ -199,39 +202,19 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 	var whereClauses []string
 	if len(ast.BaseTable.Filter) > 0 {
 		for k, v := range ast.BaseTable.Filter {
-			whereClauses = append(whereClauses, formatFilterCondition(ast.BaseTable.Alias, k, v))
+			if name, ok := datasetParamName(v); ok {
+				whereClauses = append(whereClauses, formatDatasetParamCondition(ast.BaseTable.Alias, k, name, ast.Parameters, parameterized, isRoutine))
+			} else {
+				whereClauses = append(whereClauses, formatFilterCondition(ast.BaseTable.Alias, k, v))
+			}
 		}
 	}
 
-	argIdx := 1
 	for _, cond := range ast.WhereFilters {
 		if cond.IsParamRef {
-			if isRoutine {
-				whereClauses = append(whereClauses, fmt.Sprintf("(p_%s IS NULL OR \"%s\".\"%s\" = p_%s)", cond.ParamName, cond.Table, cond.Column, cond.ParamName))
-			} else if parameterized {
-				whereClauses = append(whereClauses, fmt.Sprintf("($%d IS NULL OR \"%s\".\"%s\" = $%d)", argIdx, cond.Table, cond.Column, argIdx))
-				argIdx++
-			} else {
-				foundDefault := false
-				for _, p := range ast.Parameters {
-					if strings.EqualFold(p.ParamName, cond.ParamName) {
-						val := p.Paramvalue
-						if val == nil || val == "" {
-							val = p.DefaultValue
-						}
-						if val != nil {
-							whereClauses = append(whereClauses, fmt.Sprintf("\"%s\".\"%s\" = '%v'", cond.Table, cond.Column, val))
-							foundDefault = true
-							break
-						}
-					}
-				}
-				if !foundDefault {
-					whereClauses = append(whereClauses, fmt.Sprintf("\"%s\".\"%s\" = '%v'", cond.Table, cond.Column, cond.Value))
-				}
-			}
+			whereClauses = append(whereClauses, formatDatasetParamCondition(cond.Table, cond.Column, cond.ParamName, ast.Parameters, parameterized, isRoutine))
 		} else if cond.Value != nil {
-			whereClauses = append(whereClauses, fmt.Sprintf("\"%s\".\"%s\" = '%v'", cond.Table, cond.Column, cond.Value))
+			whereClauses = append(whereClauses, formatFilterCondition(cond.Table, cond.Column, cond.Value))
 		}
 	}
 
@@ -547,7 +530,9 @@ func (c *PostgresDataSetCompiler) buildDDL(procName, baseSchema, querySQL string
 
 		defaultClause := "DEFAULT NULL"
 		if p.DefaultValue != nil {
-			defaultClause = fmt.Sprintf("DEFAULT '%v'", p.DefaultValue)
+			if defaultString, ok := p.DefaultValue.(string); !ok || (defaultString != "CD" && !strings.HasPrefix(defaultString, "CD|") && !strings.HasPrefix(defaultString, "KTON|")) {
+				defaultClause = "DEFAULT " + formatDatasetDefault(p.DefaultValue, p.ParamDataType)
+			}
 		}
 		paramDefs = append(paramDefs, fmt.Sprintf("p_%s %s %s", p.ParamName, pgType, defaultClause))
 	}
@@ -631,6 +616,63 @@ func (w *genericCompilerWrapper) Compile(ctx context.Context, ast any, ds any) (
 //
 // When can it be used:
 // Can be used whenever compiling filter conditions into PostgreSQL SQL statements.
+func datasetParamName(value any) (string, bool) {
+	if raw, ok := value.(string); ok && strings.HasPrefix(raw, ":") && len(raw) > 1 {
+		return raw[1:], true
+	}
+	if object, ok := value.(map[string]any); ok {
+		name, ok := object["paramName"].(string)
+		return name, ok && name != ""
+	}
+	return "", false
+}
+
+func formatDatasetParamCondition(table, column, name string, params []domain.FilterParam, reference, routine bool) string {
+	field := fmt.Sprintf("\"%s\".\"%s\"", table, column)
+	if routine {
+		return fmt.Sprintf("(p_%s IS NULL OR %s = p_%s)", name, field, name)
+	}
+	if reference {
+		dataType := "string"
+		for _, param := range params {
+			if strings.EqualFold(param.ParamName, name) {
+				dataType = param.ParamDataType
+				break
+			}
+		}
+		token := fmt.Sprintf(`{"paramName":"%s","paramDataType":"%s"}`, name, dataType)
+		return fmt.Sprintf("(%s IS NULL OR %s = %s)", token, field, token)
+	}
+	for _, param := range params {
+		if strings.EqualFold(param.ParamName, name) {
+			value := param.Paramvalue
+			if value == nil || value == "" {
+				value = param.DefaultValue
+			}
+			if value != nil {
+				return fmt.Sprintf("%s = %s", field, formatDatasetDefault(value, param.ParamDataType))
+			}
+			return "TRUE"
+		}
+	}
+	return "TRUE"
+}
+
+func formatDatasetDefault(value any, dataType string) string {
+	if text, ok := value.(string); ok {
+		if expression, valid := parseCustomDateMacro(text); valid {
+			return expression
+		}
+		switch strings.ToLower(dataType) {
+		case "int", "integer", "decimal", "numeric", "float", "bool", "boolean":
+			return formatSQLVal(value)
+		default:
+			return "'" + strings.ReplaceAll(text, "'", "''") + "'"
+		}
+	}
+	return formatSQLVal(value)
+}
+
 func formatFilterCondition(table, col string, val any) string {
 	targetTable := table
 	targetCol := col

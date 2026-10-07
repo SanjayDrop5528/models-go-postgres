@@ -197,6 +197,60 @@ func TestPostgres_DataSetCompiler_RelativeDateMacro(t *testing.T) {
 	}
 }
 
+func TestPostgresDataSetCompilerQueryAndRoutineParameters(t *testing.T) {
+	compiler := postgres.NewPostgresDataSetCompiler()
+	for _, filter := range []any{":status", map[string]any{"paramName": "status", "paramDataType": "string"}} {
+		ds := &domain.DataSet{
+			SaveMode:       domain.SaveModeQuery,
+			BaseCollection: domain.BaseCollection{Schema: "iam", Collection: "employees", Filter: map[string]any{"status": filter}},
+			FilterParams:   []domain.FilterParam{{ParamName: "status", ParamDataType: "string", DefaultValue: "active"}},
+		}
+		ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compiled, err := compiler.Compile(context.Background(), ast, ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(compiled.ExecutableQuery, `"employees"."status" = 'active'`) {
+			t.Fatalf("QUERY pipeline must contain default: %s", compiled.ExecutableQuery)
+		}
+		if !strings.Contains(compiled.ReferencePipeline, `{"paramName":"status","paramDataType":"string"}`) {
+			t.Fatalf("QUERY reference must contain token: %s", compiled.ReferencePipeline)
+		}
+		ds.SaveMode = domain.SaveModeFunction
+		compiled, err = compiler.Compile(context.Background(), ast, ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(compiled.ReferencePipeline, "p_status") || !strings.Contains(compiled.DDLStatement, "p_status TEXT") {
+			t.Fatalf("function must use routine parameter: %s / %s", compiled.ReferencePipeline, compiled.DDLStatement)
+		}
+	}
+}
+
+func TestPostgresDataSetCompilerQuotesStringParameterDefaults(t *testing.T) {
+	compiler := postgres.NewPostgresDataSetCompiler()
+	ds := &domain.DataSet{
+		SaveMode:       domain.SaveModeFunction,
+		ReferenceName:  "employee_list",
+		BaseCollection: domain.BaseCollection{Schema: "iam", Collection: "employees", Filter: map[string]any{"status": ":status"}},
+		FilterParams:   []domain.FilterParam{{ParamName: "status", ParamDataType: "string", DefaultValue: "123'O"}},
+	}
+	ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile(context.Background(), ast, ds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(compiled.ExecutableQuery, `"employees"."status" = '123''O'`) || !strings.Contains(compiled.DDLStatement, `DEFAULT '123''O'`) {
+		t.Fatalf("string defaults must be quoted and escaped: %s / %s", compiled.ExecutableQuery, compiled.DDLStatement)
+	}
+}
+
 func TestPostgresDataSetCompiler_AggregatesAndJoinedGroupByUseAliases(t *testing.T) {
 	c := postgres.NewPostgresDataSetCompiler()
 	ds := &domain.DataSet{
@@ -249,7 +303,7 @@ func TestPostgresDataSetCompiler_AggregatesAndJoinedGroupByUseAliases(t *testing
 		`"d"."name" AS "department_name"`,
 		`SUM("employees"."salary") AS "total_salary"`,
 		`COUNT(*) AS "employee_count"`,
-		`"d"."is_active" = 'true'`,
+		`"d"."is_active" = true`,
 		`GROUP BY "d"."name"`,
 	} {
 		if !strings.Contains(res.ExecutableQuery, want) {
