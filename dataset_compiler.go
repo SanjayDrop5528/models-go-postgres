@@ -628,7 +628,12 @@ func datasetParamName(value any) (string, bool) {
 }
 
 func formatDatasetParamCondition(table, column, name string, params []domain.FilterParam, reference, routine bool) string {
-	field := fmt.Sprintf("\"%s\".\"%s\"", table, column)
+	var field string
+	if table != "" {
+		field = fmt.Sprintf("\"%s\".\"%s\"", table, column)
+	} else {
+		field = fmt.Sprintf("\"%s\"", column)
+	}
 	if routine {
 		return fmt.Sprintf("%s = p_%s", field, name)
 	}
@@ -681,26 +686,33 @@ func formatFilterCondition(table, col string, val any) string {
 		targetCol = col[idx+1:]
 	}
 
+	var colExpr string
+	if targetTable != "" {
+		colExpr = fmt.Sprintf("\"%s\".\"%s\"", targetTable, targetCol)
+	} else {
+		colExpr = fmt.Sprintf("\"%s\"", targetCol)
+	}
+
 	if m, ok := val.(map[string]any); ok {
 		var parts []string
 		for op, operand := range m {
 			switch op {
 			case "$gt":
-				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" > %s", targetTable, targetCol, formatSQLVal(operand)))
+				parts = append(parts, fmt.Sprintf("%s > %s", colExpr, formatSQLVal(operand)))
 			case "$gte":
-				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" >= %s", targetTable, targetCol, formatSQLVal(operand)))
+				parts = append(parts, fmt.Sprintf("%s >= %s", colExpr, formatSQLVal(operand)))
 			case "$lt":
-				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" < %s", targetTable, targetCol, formatSQLVal(operand)))
+				parts = append(parts, fmt.Sprintf("%s < %s", colExpr, formatSQLVal(operand)))
 			case "$lte":
-				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" <= %s", targetTable, targetCol, formatSQLVal(operand)))
+				parts = append(parts, fmt.Sprintf("%s <= %s", colExpr, formatSQLVal(operand)))
 			case "$ne":
-				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" <> %s", targetTable, targetCol, formatSQLVal(operand)))
+				parts = append(parts, fmt.Sprintf("%s <> %s", colExpr, formatSQLVal(operand)))
 			case "$regex", "$like":
-				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" ILIKE '%%%v%%'", targetTable, targetCol, operand))
+				parts = append(parts, fmt.Sprintf("%s ILIKE '%%%v%%'", colExpr, operand))
 			case "$in":
-				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" IN (%s)", targetTable, targetCol, formatSQLIn(operand)))
+				parts = append(parts, fmt.Sprintf("%s IN (%s)", colExpr, formatSQLIn(operand)))
 			default:
-				parts = append(parts, fmt.Sprintf("\"%s\".\"%s\" = %s", targetTable, targetCol, formatSQLVal(operand)))
+				parts = append(parts, fmt.Sprintf("%s = %s", colExpr, formatSQLVal(operand)))
 			}
 		}
 		if len(parts) > 0 {
@@ -708,9 +720,9 @@ func formatFilterCondition(table, col string, val any) string {
 		}
 	}
 	if val == nil {
-		return fmt.Sprintf("\"%s\".\"%s\" IS NULL", targetTable, targetCol)
+		return fmt.Sprintf("%s IS NULL", colExpr)
 	}
-	return fmt.Sprintf("\"%s\".\"%s\" = %s", targetTable, targetCol, formatSQLVal(val))
+	return fmt.Sprintf("%s = %s", colExpr, formatSQLVal(val))
 }
 
 // formatSQLVal formats a Go value into a valid PostgreSQL SQL literal or expression.
