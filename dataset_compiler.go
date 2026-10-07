@@ -630,7 +630,7 @@ func datasetParamName(value any) (string, bool) {
 func formatDatasetParamCondition(table, column, name string, params []domain.FilterParam, reference, routine bool) string {
 	field := fmt.Sprintf("\"%s\".\"%s\"", table, column)
 	if routine {
-		return fmt.Sprintf("(p_%s IS NULL OR %s = p_%s)", name, field, name)
+		return fmt.Sprintf("%s = p_%s", field, name)
 	}
 	if reference {
 		dataType := "string"
@@ -641,7 +641,7 @@ func formatDatasetParamCondition(table, column, name string, params []domain.Fil
 			}
 		}
 		token := fmt.Sprintf(`{"paramName":"%s","paramDataType":"%s"}`, name, dataType)
-		return fmt.Sprintf("(%s IS NULL OR %s = %s)", token, field, token)
+		return fmt.Sprintf("%s = %s", field, token)
 	}
 	for _, param := range params {
 		if strings.EqualFold(param.ParamName, name) {

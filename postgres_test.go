@@ -216,16 +216,16 @@ func TestPostgresDataSetCompilerQueryAndRoutineParameters(t *testing.T) {
 		if !strings.Contains(compiled.ExecutableQuery, `"employees"."status" = 'active'`) {
 			t.Fatalf("QUERY pipeline must contain default: %s", compiled.ExecutableQuery)
 		}
-		if !strings.Contains(compiled.ReferencePipeline, `{"paramName":"status","paramDataType":"string"}`) {
-			t.Fatalf("QUERY reference must contain token: %s", compiled.ReferencePipeline)
+		if !strings.Contains(compiled.ReferencePipeline, `"employees"."status" = {"paramName":"status","paramDataType":"string"}`) || strings.Contains(compiled.ReferencePipeline, "IS NULL OR") {
+			t.Fatalf("QUERY reference must compare directly with token: %s", compiled.ReferencePipeline)
 		}
 		ds.SaveMode = domain.SaveModeFunction
 		compiled, err = compiler.Compile(context.Background(), ast, ds)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(compiled.ReferencePipeline, "p_status") || !strings.Contains(compiled.DDLStatement, "p_status TEXT") {
-			t.Fatalf("function must use routine parameter: %s / %s", compiled.ReferencePipeline, compiled.DDLStatement)
+		if !strings.Contains(compiled.ReferencePipeline, `"employees"."status" = p_status`) || strings.Contains(compiled.ReferencePipeline, "IS NULL OR") || !strings.Contains(compiled.DDLStatement, "p_status TEXT") {
+			t.Fatalf("function must compare directly with routine parameter: %s / %s", compiled.ReferencePipeline, compiled.DDLStatement)
 		}
 	}
 }
