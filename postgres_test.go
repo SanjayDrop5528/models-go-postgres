@@ -315,6 +315,34 @@ func TestPostgresDataSetCompiler_AggregatesAndJoinedGroupByUseAliases(t *testing
 	}
 }
 
+func TestPostgresDataSetCompiler_ManyRelationUsesAnyWithCast(t *testing.T) {
+	ds := &domain.DataSet{
+		BaseCollection: domain.BaseCollection{Schema: "fleet", Collection: "service_types"},
+		JoinCollections: []domain.JoinCollection{{
+			Schema: "fleet", FromCollection: "service_types", FromCollectionField: "services_id",
+			ToCollection: "repair_service_name", ToCollectionField: "id", NamedAs: "repair_service_name_alias",
+			JoinType: domain.JoinLeft, ConvertToString: true, CastMode: "ANY_FROM",
+			Cardinality: "MANY", OutputFormat: "JSON_ARRAY",
+		}},
+		SelectedList: []domain.SelectedField{{Field: "service_types.id"}, {Field: "repair_service_name_alias.service_name"}},
+	}
+	ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := postgres.NewPostgresDataSetCompiler().Compile(context.Background(), ast, ds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `CAST("repair_service_name_alias_many"."id" AS TEXT) = ANY(CAST("service_types"."services_id" AS TEXT[]))`
+	if !strings.Contains(compiled.ExecutableQuery, want) {
+		t.Fatalf("expected valid scalar = ANY(array) condition, got: %s", compiled.ExecutableQuery)
+	}
+	if strings.Contains(compiled.ExecutableQuery, `LEFT JOIN "fleet"."repair_service_name"`) {
+		t.Fatalf("JSON array relation must use a correlated subquery: %s", compiled.ExecutableQuery)
+	}
+}
+
 func TestPostgresQueryBuilder_BuildSelectWithRelations(t *testing.T) {
 	b := &postgres.QueryBuilder{}
 

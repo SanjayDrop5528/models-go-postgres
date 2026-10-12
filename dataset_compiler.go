@@ -130,7 +130,11 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 			targetTbl = fmt.Sprintf(`"%s"."%s"`, j.Schema, j.ToTable)
 		}
 		itemAlias := j.Alias + "_many"
-		selectCols = append(selectCols, fmt.Sprintf(`COALESCE((SELECT jsonb_agg(to_jsonb("%s".*)) FROM %s AS "%s" WHERE "%s"."%s" = "%s"."%s"), '[]'::jsonb) AS "%s"`, itemAlias, targetTbl, itemAlias, itemAlias, j.ToField, j.FromTable, j.FromField, j.Alias))
+		whereCondition := buildPostgresJoinCondition(j, j.FromTable, itemAlias)
+		for k, v := range j.JoinFilter {
+			whereCondition += " AND " + formatFilterCondition(itemAlias, k, v)
+		}
+		selectCols = append(selectCols, fmt.Sprintf(`COALESCE((SELECT jsonb_agg(to_jsonb("%s".*)) FROM %s AS "%s" WHERE %s), '[]'::jsonb) AS "%s"`, itemAlias, targetTbl, itemAlias, whereCondition, j.Alias))
 	}
 
 	// 2. Custom Columns
@@ -183,7 +187,7 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 	// 4. Joins
 	var joinClauses []string
 	for _, j := range ast.Joins {
-		if strings.EqualFold(j.Cardinality, "MANY") || strings.EqualFold(j.OutputFormat, "JSON_ARRAY") || strings.EqualFold(j.OutputFormat, "OBJECT") {
+		if strings.EqualFold(j.Cardinality, "MANY") || strings.EqualFold(j.OutputFormat, "JSON_ARRAY") {
 			continue
 		}
 		jType := "LEFT JOIN"
@@ -196,23 +200,7 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 			jType = "FULL JOIN"
 		}
 
-		onCondition := fmt.Sprintf("\"%s\".\"%s\" = \"%s\".\"%s\"", j.FromTable, j.FromField, j.Alias, j.ToField)
-		if j.ConvertString {
-			switch strings.ToUpper(j.CastMode) {
-			case "ANY_FROM":
-				onCondition = fmt.Sprintf("\"%s\".\"%s\" = ANY(CAST(\"%s\".\"%s\" AS TEXT[]))", j.FromTable, j.FromField, j.Alias, j.ToField)
-			case "ANY_TO":
-				onCondition = fmt.Sprintf("ANY(CAST(\"%s\".\"%s\" AS TEXT[])) = \"%s\".\"%s\"", j.FromTable, j.FromField, j.Alias, j.ToField)
-			case "ANY_BOTH":
-				onCondition = fmt.Sprintf("ANY(CAST(\"%s\".\"%s\" AS TEXT[])) = ANY(CAST(\"%s\".\"%s\" AS TEXT[]))", j.FromTable, j.FromField, j.Alias, j.ToField)
-			case "FROM_ONLY":
-				onCondition = fmt.Sprintf("CAST(\"%s\".\"%s\" AS TEXT) = \"%s\".\"%s\"", j.FromTable, j.FromField, j.Alias, j.ToField)
-			case "TO_ONLY":
-				onCondition = fmt.Sprintf("\"%s\".\"%s\" = CAST(\"%s\".\"%s\" AS TEXT)", j.FromTable, j.FromField, j.Alias, j.ToField)
-			default:
-				onCondition = fmt.Sprintf("CAST(\"%s\".\"%s\" AS TEXT) = CAST(\"%s\".\"%s\" AS TEXT)", j.FromTable, j.FromField, j.Alias, j.ToField)
-			}
-		}
+		onCondition := buildPostgresJoinCondition(j, j.FromTable, j.Alias)
 
 		// Join filter applied directly to the ON clause
 		if len(j.JoinFilter) > 0 {
@@ -273,6 +261,29 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 	}
 
 	return sql + ";"
+}
+
+func buildPostgresJoinCondition(j planner.ASTJoin, fromAlias, toAlias string) string {
+	from := fmt.Sprintf(`"%s"."%s"`, fromAlias, j.FromField)
+	to := fmt.Sprintf(`"%s"."%s"`, toAlias, j.ToField)
+	if !j.ConvertString {
+		return fmt.Sprintf("%s = %s", from, to)
+	}
+
+	switch strings.ToUpper(strings.TrimSpace(j.CastMode)) {
+	case "ANY_FROM": // FROM is the array; TARGET is the scalar.
+		return fmt.Sprintf("CAST(%s AS TEXT) = ANY(CAST(%s AS TEXT[]))", to, from)
+	case "ANY_TO": // TARGET is the array; FROM is the scalar.
+		return fmt.Sprintf("CAST(%s AS TEXT) = ANY(CAST(%s AS TEXT[]))", from, to)
+	case "ANY_BOTH": // Both fields are arrays; match when they overlap.
+		return fmt.Sprintf("CAST(%s AS TEXT[]) && CAST(%s AS TEXT[])", from, to)
+	case "FROM_ONLY":
+		return fmt.Sprintf("CAST(%s AS TEXT) = %s", from, to)
+	case "TO_ONLY":
+		return fmt.Sprintf("%s = CAST(%s AS TEXT)", from, to)
+	default:
+		return fmt.Sprintf("CAST(%s AS TEXT) = CAST(%s AS TEXT)", from, to)
+	}
 }
 
 func renderPostgresFunctionExpression(template string, operands []planner.ASTOperand) string {
