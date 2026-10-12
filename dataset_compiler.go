@@ -707,10 +707,14 @@ func formatFilterCondition(table, col string, val any) string {
 				parts = append(parts, fmt.Sprintf("%s <= %s", colExpr, formatSQLVal(operand)))
 			case "$ne":
 				parts = append(parts, fmt.Sprintf("%s <> %s", colExpr, formatSQLVal(operand)))
+			case "$eq", "$equals":
+				parts = append(parts, fmt.Sprintf("%s = %s", colExpr, formatSQLVal(operand)))
 			case "$regex", "$like":
 				parts = append(parts, fmt.Sprintf("%s ILIKE '%%%v%%'", colExpr, operand))
 			case "$in":
 				parts = append(parts, fmt.Sprintf("%s IN (%s)", colExpr, formatSQLIn(operand)))
+			case "$nin", "$notin", "$not_in":
+				parts = append(parts, fmt.Sprintf("%s NOT IN (%s)", colExpr, formatSQLIn(operand)))
 			default:
 				parts = append(parts, fmt.Sprintf("%s = %s", colExpr, formatSQLVal(operand)))
 			}

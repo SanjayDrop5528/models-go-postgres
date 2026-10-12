@@ -496,7 +496,7 @@ func (b *QueryBuilder) buildWhere(table string, q query.Query, argIdx *int) (str
 			args = append(args, f.Value)
 			*argIdx++
 		case query.OpNin:
-			clauses = append(clauses, fmt.Sprintf("NOT (%s = ANY($%d))", col, *argIdx))
+			clauses = append(clauses, fmt.Sprintf("%s <> ALL($%d)", col, *argIdx))
 			args = append(args, f.Value)
 			*argIdx++
 		case query.OpBetween:
