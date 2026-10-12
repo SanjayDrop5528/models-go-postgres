@@ -99,11 +99,38 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 
 	// 1. Projections
 	for _, p := range ast.Projections {
+		isManyRelation := false
+		for _, j := range ast.Joins {
+			if strings.EqualFold(j.Alias, p.SourceTable) && (strings.EqualFold(j.Cardinality, "MANY") || strings.EqualFold(j.OutputFormat, "JSON_ARRAY") || strings.EqualFold(j.OutputFormat, "OBJECT")) {
+				isManyRelation = true
+				break
+			}
+		}
+		if isManyRelation {
+			continue
+		}
 		colExpr := fmt.Sprintf("\"%s\".\"%s\"", p.SourceTable, p.SourceField)
 		if p.Alias != "" && p.Alias != p.SourceField {
 			colExpr += fmt.Sprintf(" AS \"%s\"", p.Alias)
 		}
 		selectCols = append(selectCols, colExpr)
+	}
+
+	// Project relations according to the requested JSON shape.
+	for _, j := range ast.Joins {
+		if strings.EqualFold(j.OutputFormat, "OBJECT") && !strings.EqualFold(j.Cardinality, "MANY") {
+			selectCols = append(selectCols, fmt.Sprintf(`CASE WHEN "%s"."%s" IS NULL THEN NULL ELSE to_jsonb("%s".*) END AS "%s"`, j.Alias, j.ToField, j.Alias, j.Alias))
+			continue
+		}
+		if !strings.EqualFold(j.Cardinality, "MANY") && !strings.EqualFold(j.OutputFormat, "JSON_ARRAY") {
+			continue
+		}
+		targetTbl := fmt.Sprintf(`"%s"`, j.ToTable)
+		if j.Schema != "" && j.Schema != "public" {
+			targetTbl = fmt.Sprintf(`"%s"."%s"`, j.Schema, j.ToTable)
+		}
+		itemAlias := j.Alias + "_many"
+		selectCols = append(selectCols, fmt.Sprintf(`COALESCE((SELECT jsonb_agg(to_jsonb("%s".*)) FROM %s AS "%s" WHERE "%s"."%s" = "%s"."%s"), '[]'::jsonb) AS "%s"`, itemAlias, targetTbl, itemAlias, itemAlias, j.ToField, j.FromTable, j.FromField, j.Alias))
 	}
 
 	// 2. Custom Columns
@@ -156,6 +183,9 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 	// 4. Joins
 	var joinClauses []string
 	for _, j := range ast.Joins {
+		if strings.EqualFold(j.Cardinality, "MANY") || strings.EqualFold(j.OutputFormat, "JSON_ARRAY") || strings.EqualFold(j.OutputFormat, "OBJECT") {
+			continue
+		}
 		jType := "LEFT JOIN"
 		switch j.Type {
 		case domain.JoinInner:
@@ -169,6 +199,12 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 		onCondition := fmt.Sprintf("\"%s\".\"%s\" = \"%s\".\"%s\"", j.FromTable, j.FromField, j.Alias, j.ToField)
 		if j.ConvertString {
 			switch strings.ToUpper(j.CastMode) {
+			case "ANY_FROM":
+				onCondition = fmt.Sprintf("\"%s\".\"%s\" = ANY(CAST(\"%s\".\"%s\" AS TEXT[]))", j.FromTable, j.FromField, j.Alias, j.ToField)
+			case "ANY_TO":
+				onCondition = fmt.Sprintf("ANY(CAST(\"%s\".\"%s\" AS TEXT[])) = \"%s\".\"%s\"", j.FromTable, j.FromField, j.Alias, j.ToField)
+			case "ANY_BOTH":
+				onCondition = fmt.Sprintf("ANY(CAST(\"%s\".\"%s\" AS TEXT[])) = ANY(CAST(\"%s\".\"%s\" AS TEXT[]))", j.FromTable, j.FromField, j.Alias, j.ToField)
 			case "FROM_ONLY":
 				onCondition = fmt.Sprintf("CAST(\"%s\".\"%s\" AS TEXT) = \"%s\".\"%s\"", j.FromTable, j.FromField, j.Alias, j.ToField)
 			case "TO_ONLY":
