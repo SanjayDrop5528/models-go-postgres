@@ -131,3 +131,46 @@ func TestSlowQueryLogsInColor(t *testing.T) {
 	}
 }
 
+func TestExecute_OpQuery_NormalizesJSONAndArray(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer database.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM service_types")).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "services_id", "repair_service_name_alias"}).
+			AddRow(
+				"d06a2be8-0676-4acc-804b-261e88bf7649",
+				"{9256960b-122e-4555-b507-dde679f71b2c,727100b8-b416-4ded-aac0-2491f6826401}",
+				[]byte(`[{"id": "9256960b-122e-4555-b507-dde679f71b2c", "service_name": "dsadsa"}]`),
+			))
+
+	adapter := NewPostgresAdapterFromDB(database)
+	res, err := adapter.Execute(context.Background(), execution.ExecutionRequest{
+		Operation: "QUERY",
+		Target:    "SELECT * FROM service_types",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	rows, ok := res.Data.([]map[string]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %#v", res.Data)
+	}
+	aliasVal, ok := rows[0]["repair_service_name_alias"].([]any)
+	if !ok {
+		t.Fatalf("expected repair_service_name_alias to be []any, got %T: %#v", rows[0]["repair_service_name_alias"], rows[0]["repair_service_name_alias"])
+	}
+	if len(aliasVal) != 1 {
+		t.Fatalf("expected 1 item in alias, got %d", len(aliasVal))
+	}
+	servicesIDVal, ok := rows[0]["services_id"].([]any)
+	if !ok {
+		t.Fatalf("expected services_id to be []any, got %T: %#v", rows[0]["services_id"], rows[0]["services_id"])
+	}
+	if len(servicesIDVal) != 2 || servicesIDVal[0] != "9256960b-122e-4555-b507-dde679f71b2c" {
+		t.Fatalf("expected 2 uuids in services_id, got %#v", servicesIDVal)
+	}
+}
+

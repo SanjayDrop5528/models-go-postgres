@@ -1497,6 +1497,66 @@ func debugPostgresRelationJoins(q query.Query, parentPath string, joins []relati
 	}
 }
 
+func parsePostgresArray(s string) ([]any, bool) {
+	s = strings.TrimSpace(s)
+	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
+		return nil, false
+	}
+	content := s[1 : len(s)-1]
+	if strings.TrimSpace(content) == "" {
+		return []any{}, true
+	}
+
+	var result []any
+	var current strings.Builder
+	inQuotes := false
+	escaped := false
+	hasQuote := false
+
+	for i := 0; i < len(content); i++ {
+		ch := content[i]
+		if escaped {
+			current.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+		if ch == '"' {
+			inQuotes = !inQuotes
+			hasQuote = true
+			continue
+		}
+		if ch == ',' && !inQuotes {
+			elem := current.String()
+			if !hasQuote && strings.EqualFold(elem, "NULL") {
+				result = append(result, nil)
+			} else {
+				result = append(result, elem)
+			}
+			current.Reset()
+			hasQuote = false
+			continue
+		}
+		current.WriteByte(ch)
+	}
+
+	if inQuotes {
+		return nil, false
+	}
+
+	elem := current.String()
+	if !hasQuote && strings.EqualFold(elem, "NULL") {
+		result = append(result, nil)
+	} else {
+		result = append(result, elem)
+	}
+
+	return result, true
+}
+
 func normalizePostgresValue(val any) any {
 	switch v := val.(type) {
 	case []byte:
@@ -1511,7 +1571,36 @@ func normalizePostgresValue(val any) any {
 		if json.Unmarshal(v, &arr) == nil {
 			return arr
 		}
-		return string(v)
+		s := string(v)
+		if strings.HasPrefix(strings.TrimSpace(s), "{") && strings.HasSuffix(strings.TrimSpace(s), "}") {
+			if pgArr, ok := parsePostgresArray(s); ok {
+				return pgArr
+			}
+		}
+		return s
+
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if len(trimmed) == 0 {
+			return v
+		}
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			var arr []any
+			if json.Unmarshal([]byte(trimmed), &arr) == nil {
+				return arr
+			}
+		}
+		if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
+			var obj map[string]any
+			if json.Unmarshal([]byte(trimmed), &obj) == nil {
+				return obj
+			}
+			if pgArr, ok := parsePostgresArray(trimmed); ok {
+				return pgArr
+			}
+		}
+		return v
+
 	default:
 		return val
 	}
@@ -1814,12 +1903,7 @@ func (a *PostgresAdapter) Execute(ctx context.Context, req execution.ExecutionRe
 
 				rowMap := make(map[string]any)
 				for i, col := range cols {
-					val := values[i]
-					if b, ok := val.([]byte); ok {
-						rowMap[col] = string(b)
-					} else {
-						rowMap[col] = val
-					}
+					rowMap[col] = normalizePostgresValue(values[i])
 				}
 				resultRows = append(resultRows, rowMap)
 			}
