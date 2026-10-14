@@ -374,6 +374,45 @@ func TestPostgresDataSetCompiler_NestedRelationsUseSelectedFields(t *testing.T) 
 	}
 }
 
+func TestPostgresDataSetCompiler_NoneRelationFlatFields(t *testing.T) {
+	ds := &domain.DataSet{
+		BaseCollection: domain.BaseCollection{Collection: "vehicle"},
+		JoinCollections: []domain.JoinCollection{
+			{
+				FromCollection:      "vehicle",
+				FromCollectionField: "vehicle_category_id",
+				ToCollection:        "vehicle_categories",
+				ToCollectionField:   "id",
+				NamedAs:             "vehicle_categories",
+				Cardinality:         "NONE",
+				OutputFormat:        "NONE",
+			},
+		},
+		SelectedList: []domain.SelectedField{
+			{Field: "vehicle.registration_no", HeaderName: "registration_no"},
+			{Field: "vehicle_categories.code", HeaderName: "code"},
+		},
+	}
+	ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := postgres.NewPostgresDataSetCompiler().Compile(context.Background(), ast, ds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// NONE relations must not build a JSON object or array. They project flat columns.
+	if strings.Contains(compiled.ExecutableQuery, "jsonb_build_object") || strings.Contains(compiled.ExecutableQuery, "jsonb_agg") {
+		t.Fatalf("expected flat fields, got JSON aggregation/object: %s", compiled.ExecutableQuery)
+	}
+	if !strings.Contains(compiled.ExecutableQuery, `"vehicle_categories"."code"`) {
+		t.Fatalf("expected flat projected column for joined table, got: %s", compiled.ExecutableQuery)
+	}
+	if !strings.Contains(compiled.ExecutableQuery, `LEFT JOIN "vehicle_categories" AS "vehicle_categories"`) {
+		t.Fatalf("expected standard LEFT JOIN clause, got: %s", compiled.ExecutableQuery)
+	}
+}
+
 func TestPostgresQueryBuilder_BuildSelectWithRelations(t *testing.T) {
 	b := &postgres.QueryBuilder{}
 

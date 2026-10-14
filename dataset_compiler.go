@@ -140,9 +140,14 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 	for _, p := range ast.Projections {
 		isNestedRelation := false
 		for _, j := range ast.Joins {
-			if strings.EqualFold(j.Alias, p.SourceTable) && (strings.EqualFold(j.Cardinality, "MANY") || strings.EqualFold(j.OutputFormat, "JSON_ARRAY") || strings.EqualFold(j.OutputFormat, "OBJECT")) {
-				isNestedRelation = true
-				break
+			if strings.EqualFold(j.Alias, p.SourceTable) {
+				if strings.EqualFold(j.OutputFormat, "NONE") || strings.EqualFold(j.Cardinality, "NONE") {
+					continue
+				}
+				if strings.EqualFold(j.Cardinality, "MANY") || strings.EqualFold(j.OutputFormat, "JSON_ARRAY") || strings.EqualFold(j.OutputFormat, "OBJECT") {
+					isNestedRelation = true
+					break
+				}
 			}
 		}
 		if isNestedRelation {
@@ -157,6 +162,9 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 
 	// Project relations according to the requested JSON shape.
 	for _, j := range ast.Joins {
+		if strings.EqualFold(j.OutputFormat, "NONE") || strings.EqualFold(j.Cardinality, "NONE") {
+			continue
+		}
 		relationFields := relationProjections(ast, j)
 		if strings.EqualFold(j.OutputFormat, "OBJECT") && !strings.EqualFold(j.Cardinality, "MANY") {
 			objectExpr := postgresJSONObject(j.Alias, relationFields)
@@ -229,7 +237,9 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 	// 4. Joins
 	var joinClauses []string
 	for _, j := range ast.Joins {
-		if strings.EqualFold(j.Cardinality, "MANY") || strings.EqualFold(j.OutputFormat, "JSON_ARRAY") {
+		if strings.EqualFold(j.OutputFormat, "NONE") || strings.EqualFold(j.Cardinality, "NONE") {
+			// keep standard JOIN for flat fields
+		} else if strings.EqualFold(j.Cardinality, "MANY") || strings.EqualFold(j.OutputFormat, "JSON_ARRAY") {
 			continue
 		}
 		jType := "LEFT JOIN"
