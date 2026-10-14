@@ -89,7 +89,7 @@ func ToPostgresType(attr schema.SchemaAttribute) string {
 	case model.TypeTime:
 		return "TIME"
 
-	case model.TypeJSON:
+	case model.TypeJSON, model.TypeCustom, "custom_type", "CUSTOM_TYPE":
 		return "JSONB"
 
 	case model.TypeUUID:
