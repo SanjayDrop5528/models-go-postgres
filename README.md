@@ -72,6 +72,25 @@ Compiles schema operations into PostgreSQL DDL statements.
 
 ## 🚀 Usage Example
 
+### Selecting fields inside dataset relations
+
+For `OBJECT` and `JSON_ARRAY` dataset joins, the relation shape comes from `join_collections` and the nested fields come from `selected_list`. Only selected relation fields are serialized. Automatic headers such as `customer_name` are normalized back to `name` inside the object; a custom header is retained as the JSON key.
+
+```json
+{
+  "join_collections": [
+    {"toCollection":"customers","namedAs":"customer","cardinality":"ONE","outputFormat":"OBJECT"},
+    {"toCollection":"items","namedAs":"items","cardinality":"MANY","outputFormat":"JSON_ARRAY"}
+  ],
+  "selected_list": [
+    {"field":"customer.name","headerName":"customer_name"},
+    {"field":"items.sku","headerName":"items_sku"}
+  ]
+}
+```
+
+The result contains `customer: {"name": ...}` and `items: [{"sku": ...}]` without unselected relation columns.
+
 ### Orbital relation loading
 
 Orbital values are lazy by default. Set `load_with_children: true` on the

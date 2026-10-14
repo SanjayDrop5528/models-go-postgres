@@ -71,6 +71,24 @@ type PostgresAdapter struct {
 //
 // When can it be used:
 // Can be used whenever an application needs to interact with a PostgreSQL database or mock in-memory fallback.
+//
+// Parameters:
+//   - dsn (string): Input value used by the operation.
+//
+// Returns:
+//   - result1 (*PostgresAdapter): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by NewPostgresAdapter and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func NewPostgresAdapter(dsn string) *PostgresAdapter {
 	return &PostgresAdapter{
 		dsn:          dsn,
@@ -85,6 +103,24 @@ func NewPostgresAdapter(dsn string) *PostgresAdapter {
 // retains ownership of the pool, so Close detaches the adapter without closing
 // the shared connection. This is intended for tenant routers and applications
 // that already manage their own pools.
+//
+// Parameters:
+//   - db (*sql.DB): Input value used by the operation.
+//
+// Returns:
+//   - result1 (*PostgresAdapter): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by NewPostgresAdapterFromDB and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func NewPostgresAdapterFromDB(db *sql.DB) *PostgresAdapter {
 	a := NewPostgresAdapter("")
 	a.db = db
@@ -103,6 +139,24 @@ func NewPostgresAdapterFromDB(db *sql.DB) *PostgresAdapter {
 //
 // When can it be used:
 // Can be used when working with multi-schema PostgreSQL databases or non-default schemas.
+//
+// Parameters:
+//   - schemas (...string): Input value used by the operation.
+//
+// Returns:
+//   - result1 (*PostgresAdapter): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by WithSchemas and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (a *PostgresAdapter) WithSchemas(schemas ...string) *PostgresAdapter {
 	a.schemas = schemas
 	return a
@@ -118,6 +172,24 @@ func (a *PostgresAdapter) WithSchemas(schemas ...string) *PostgresAdapter {
 //
 // When can it be used:
 // Can be used whenever an adapter driver name is inspected.
+//
+// Parameters:
+//   - None.
+//
+// Returns:
+//   - result1 (string): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Name and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (a *PostgresAdapter) Name() string {
 	return "postgres"
 }
@@ -132,6 +204,24 @@ func (a *PostgresAdapter) Name() string {
 //
 // When can it be used:
 // Can be used before initiating advanced database features like stored procedures or JSON schema checks.
+//
+// Parameters:
+//   - None.
+//
+// Returns:
+//   - result1 (adapter.Capabilities): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Capabilities and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (a *PostgresAdapter) Capabilities() adapter.Capabilities {
 	return adapter.Capabilities{
 		Category:                    adapter.StorageCategoryRelational,
@@ -147,10 +237,45 @@ func (a *PostgresAdapter) Capabilities() adapter.Capabilities {
 }
 
 // NativeClient returns the underlying *sql.DB connection handle.
+//
+// Parameters:
+//   - None.
+//
+// Returns:
+//   - result1 (any): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by NativeClient and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (a *PostgresAdapter) NativeClient() any {
 	return a.DB()
 }
 
+// Parameters:
+//   - None.
+//
+// Returns:
+//   - result1 (*sql.DB): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by DB and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (a *PostgresAdapter) DB() *sql.DB {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -158,11 +283,47 @@ func (a *PostgresAdapter) DB() *sql.DB {
 }
 
 // DatabaseName returns the target database name.
+//
+// Parameters:
+//   - None.
+//
+// Returns:
+//   - result1 (string): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by DatabaseName and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (a *PostgresAdapter) DatabaseName() string {
 	return a.GetDatabaseName()
 }
 
 // GetDatabaseName returns the database name extracted from the DSN string, or "in-memory mock" if no DSN.
+//
+// Parameters:
+//   - None.
+//
+// Returns:
+//   - result1 (string): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by GetDatabaseName and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (a *PostgresAdapter) GetDatabaseName() string {
 	u, err := url.Parse(a.dsn)
 	if err != nil || u.Path == "" || u.Path == "/" {
@@ -260,6 +421,24 @@ func (a *PostgresAdapter) getDB(ctx context.Context) (*sql.DB, error) {
 }
 
 // EnsureMetadataTables creates 'model_configs' and 'data_models' system metadata tables if they do not exist.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//
+// Returns:
+//   - result1 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by EnsureMetadataTables and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) EnsureMetadataTables(ctx context.Context) error {
 	db, err := a.getDB(ctx)
 	if err != nil || db == nil {
@@ -379,6 +558,26 @@ func (a *PostgresAdapter) ensureMetadataTablesInternal(ctx context.Context, db *
 }
 
 // ImportLiveMetadata introspects live PostgreSQL database tables and auto-populates model_configs & data_models.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//
+// Returns:
+//   - result1 ([]*model.ModelConfig): Returned value.
+//   - result2 ([]*model.DataModel): Returned value.
+//   - result3 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by ImportLiveMetadata and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) ImportLiveMetadata(ctx context.Context) ([]*model.ModelConfig, []*model.DataModel, error) {
 	log.Printf("[PostgreSQL] [Import] Connecting to live database catalog (Database: '%s')...", a.GetDatabaseName())
 	db, err := a.getDB(ctx)
@@ -514,11 +713,45 @@ func (a *PostgresAdapter) ImportLiveMetadata(ctx context.Context) ([]*model.Mode
 	return configs, fields, nil
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//
+// Returns:
+//   - result1 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Connect and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) Connect(ctx context.Context) error {
 	_, err := a.getDB(ctx)
 	return err
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//
+// Returns:
+//   - result1 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Ping and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) Ping(ctx context.Context) error {
 	db, err := a.getDB(ctx)
 	if err != nil {
@@ -530,6 +763,23 @@ func (a *PostgresAdapter) Ping(ctx context.Context) error {
 	return nil
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//
+// Returns:
+//   - result1 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Close and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) Close(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -545,6 +795,26 @@ func (a *PostgresAdapter) Close(ctx context.Context) error {
 }
 
 // GetSchema introspects the PostgreSQL catalog.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - ref (model.ModelRef): Input value used by the operation.
+//
+// Returns:
+//   - result1 (*schema.Schema): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by GetSchema and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) GetSchema(ctx context.Context, ref model.ModelRef) (*schema.Schema, error) {
 	if a.introspector == nil {
 		return nil, nil
@@ -557,12 +827,51 @@ func (a *PostgresAdapter) GetSchema(ctx context.Context, ref model.ModelRef) (*s
 }
 
 // ValidateSchemaPlan checks for PostgreSQL-specific limitations.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - p (*plan.SchemaPlan): Input value used by the operation.
+//
+// Returns:
+//   - result1 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by ValidateSchemaPlan and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) ValidateSchemaPlan(ctx context.Context, p *plan.SchemaPlan) error {
 	_, err := a.ddlGen.GenerateStatements(p.Operations)
 	return err
 }
 
 // PreviewSchemaChange compiles operations to native PostgreSQL SQL statements.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - p (*plan.SchemaPlan): Input value used by the operation.
+//
+// Returns:
+//   - result1 (*plan.SchemaPreview): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by PreviewSchemaChange and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) PreviewSchemaChange(ctx context.Context, p *plan.SchemaPlan) (*plan.SchemaPreview, error) {
 	statements, err := a.ddlGen.GenerateStatements(p.Operations)
 	if err != nil {
@@ -594,6 +903,25 @@ func (a *PostgresAdapter) PreviewSchemaChange(ctx context.Context, p *plan.Schem
 }
 
 // ApplySchemaChange executes DDL migration statements inside a transaction.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - p (*plan.SchemaPlan): Input value used by the operation.
+//
+// Returns:
+//   - result1 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by ApplySchemaChange and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) ApplySchemaChange(ctx context.Context, p *plan.SchemaPlan) error {
 	statements, err := a.ddlGen.GenerateStatements(p.Operations)
 	if err != nil {
@@ -1310,6 +1638,27 @@ func uniqueNonEmpty(values ...string) []string {
 }
 
 // Create inserts a row using parameterized SQL.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - ref (model.ModelRef): Input value used by the operation.
+//   - data (map[string]any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (map[string]any): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Create and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) Create(ctx context.Context, ref model.ModelRef, data map[string]any) (map[string]any, error) {
 	tableName := a.resolveTableName(ref)
 	res := make(map[string]any)
@@ -1338,6 +1687,28 @@ func (a *PostgresAdapter) Create(ctx context.Context, ref model.ModelRef, data m
 }
 
 // Find queries PostgreSQL.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - ref (model.ModelRef): Input value used by the operation.
+//   - q (query.Query): Input value used by the operation.
+//
+// Returns:
+//   - result1 ([]map[string]any): Returned value.
+//   - result2 (int64): Returned value.
+//   - result3 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Find and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) Find(ctx context.Context, ref model.ModelRef, q query.Query) ([]map[string]any, int64, error) {
 	q = q.EnsureDebugTrace()
 	started := time.Now()
@@ -1659,6 +2030,27 @@ func scanMapRows(rows *sql.Rows) ([]map[string]any, error) {
 }
 
 // FindOne finds a record by ID.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - ref (model.ModelRef): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (map[string]any): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by FindOne and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) FindOne(ctx context.Context, ref model.ModelRef, id any) (map[string]any, error) {
 	return a.FindOneWithQuery(ctx, ref, id, query.NewQuery())
 }
@@ -1666,6 +2058,28 @@ func (a *PostgresAdapter) FindOne(ctx context.Context, ref model.ModelRef, id an
 // FindOneWithQuery retrieves one row while preserving relation requests. This
 // is the single-record counterpart of Find and is what allows callers to load
 // orbital objects and reverse-reference arrays for a primary-key lookup.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - ref (model.ModelRef): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//   - q (query.Query): Input value used by the operation.
+//
+// Returns:
+//   - result1 (map[string]any): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by FindOneWithQuery and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) FindOneWithQuery(ctx context.Context, ref model.ModelRef, id any, q query.Query) (map[string]any, error) {
 	tableName := a.resolveTableName(ref)
 	idStr := fmt.Sprintf("%v", id)
@@ -1705,6 +2119,28 @@ func (a *PostgresAdapter) FindOneWithQuery(ctx context.Context, ref model.ModelR
 }
 
 // Update updates a record by ID.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - ref (model.ModelRef): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//   - data (map[string]any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (map[string]any): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Update and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) Update(ctx context.Context, ref model.ModelRef, id any, data map[string]any) (map[string]any, error) {
 	tableName := a.resolveTableName(ref)
 	idStr := fmt.Sprintf("%v", id)
@@ -1748,6 +2184,28 @@ func hasMutableFields(data map[string]any, primaryKey string) bool {
 }
 
 // Patch updates specific fields by ID.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - ref (model.ModelRef): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//   - data (map[string]any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (map[string]any): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Patch and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) Patch(ctx context.Context, ref model.ModelRef, id any, data map[string]any) (map[string]any, error) {
 	tableName := a.resolveTableName(ref)
 	idStr := fmt.Sprintf("%v", id)
@@ -1775,6 +2233,26 @@ func (a *PostgresAdapter) Patch(ctx context.Context, ref model.ModelRef, id any,
 }
 
 // Delete removes a record by ID.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - ref (model.ModelRef): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Delete and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) Delete(ctx context.Context, ref model.ModelRef, id any) error {
 	tableName := a.resolveTableName(ref)
 	idStr := fmt.Sprintf("%v", id)
@@ -1802,6 +2280,26 @@ func (a *PostgresAdapter) Delete(ctx context.Context, ref model.ModelRef, id any
 }
 
 // Execute executes a generic operation (function, procedure, command) in PostgreSQL.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - req (execution.ExecutionRequest): Input value used by the operation.
+//
+// Returns:
+//   - result1 (*execution.ExecutionResult): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Execute and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) Execute(ctx context.Context, req execution.ExecutionRequest) (*execution.ExecutionResult, error) {
 	switch req.Operation {
 	case operation.OpFunction:
@@ -2002,6 +2500,25 @@ func orderedExecutionArgs(req execution.ExecutionRequest) ([]any, error) {
 }
 
 // Begin starts a new PostgreSQL transaction.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//
+// Returns:
+//   - result1 (adapter.Transaction): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Begin and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) Begin(ctx context.Context) (adapter.Transaction, error) {
 	if a.db == nil {
 		return &PostgresTransaction{adapter: a}, nil
@@ -2022,6 +2539,26 @@ type PostgresTransaction struct {
 	tx      *sql.Tx
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - model (model.ModelRef): Input value used by the operation.
+//   - data (map[string]any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (map[string]any): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Create and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (t *PostgresTransaction) Create(ctx context.Context, model model.ModelRef, data map[string]any) (map[string]any, error) {
 	if t.tx == nil {
 		return t.adapter.Create(ctx, model, data)
@@ -2035,6 +2572,27 @@ func (t *PostgresTransaction) Create(ctx context.Context, model model.ModelRef, 
 	return scanSingleMap(rows)
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - model (model.ModelRef): Input value used by the operation.
+//   - q (query.Query): Input value used by the operation.
+//
+// Returns:
+//   - result1 ([]map[string]any): Returned value.
+//   - result2 (int64): Returned value.
+//   - result3 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Find and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (t *PostgresTransaction) Find(ctx context.Context, model model.ModelRef, q query.Query) ([]map[string]any, int64, error) {
 	if t.tx == nil {
 		return t.adapter.Find(ctx, model, q)
@@ -2062,10 +2620,51 @@ func (t *PostgresTransaction) Find(ctx context.Context, model model.ModelRef, q 
 	return results, total, nil
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - model (model.ModelRef): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (map[string]any): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by FindOne and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (t *PostgresTransaction) FindOne(ctx context.Context, model model.ModelRef, id any) (map[string]any, error) {
 	return t.FindOneWithQuery(ctx, model, id, query.NewQuery())
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - model (model.ModelRef): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//   - q (query.Query): Input value used by the operation.
+//
+// Returns:
+//   - result1 (map[string]any): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by FindOneWithQuery and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (t *PostgresTransaction) FindOneWithQuery(ctx context.Context, model model.ModelRef, id any, q query.Query) (map[string]any, error) {
 	if t.tx == nil {
 		return t.adapter.FindOneWithQuery(ctx, model, id, q)
@@ -2085,6 +2684,27 @@ func (t *PostgresTransaction) FindOneWithQuery(ctx context.Context, model model.
 	return rows[0], nil
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - model (model.ModelRef): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//   - data (map[string]any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (map[string]any): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Update and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (t *PostgresTransaction) Update(ctx context.Context, model model.ModelRef, id any, data map[string]any) (map[string]any, error) {
 	if t.tx == nil {
 		return t.adapter.Update(ctx, model, id, data)
@@ -2104,10 +2724,50 @@ func (t *PostgresTransaction) Update(ctx context.Context, model model.ModelRef, 
 	return scanSingleMap(rows)
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - model (model.ModelRef): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//   - data (map[string]any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (map[string]any): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Patch and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (t *PostgresTransaction) Patch(ctx context.Context, model model.ModelRef, id any, data map[string]any) (map[string]any, error) {
 	return t.Update(ctx, model, id, data)
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - model (model.ModelRef): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Delete and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (t *PostgresTransaction) Delete(ctx context.Context, model model.ModelRef, id any) error {
 	if t.tx == nil {
 		return t.adapter.Delete(ctx, model, id)
@@ -2121,6 +2781,25 @@ func (t *PostgresTransaction) Delete(ctx context.Context, model model.ModelRef, 
 	return err
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - req (execution.ExecutionRequest): Input value used by the operation.
+//
+// Returns:
+//   - result1 (*execution.ExecutionResult): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Execute and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (t *PostgresTransaction) Execute(ctx context.Context, req execution.ExecutionRequest) (*execution.ExecutionResult, error) {
 	if t.tx == nil {
 		return t.adapter.Execute(ctx, req)
@@ -2182,6 +2861,23 @@ func (t *PostgresTransaction) Execute(ctx context.Context, req execution.Executi
 	}
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//
+// Returns:
+//   - result1 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Commit and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (t *PostgresTransaction) Commit(ctx context.Context) error {
 	if t.tx != nil {
 		return t.tx.Commit()
@@ -2189,6 +2885,23 @@ func (t *PostgresTransaction) Commit(ctx context.Context) error {
 	return nil
 }
 
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//
+// Returns:
+//   - result1 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Rollback and its owning package.
+//
+// Side Effects:
+//   - May update receiver state, persistent storage, or configured external dependencies.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (t *PostgresTransaction) Rollback(ctx context.Context) error {
 	if t.tx != nil {
 		return t.tx.Rollback()
@@ -2196,6 +2909,23 @@ func (t *PostgresTransaction) Rollback(ctx context.Context) error {
 	return nil
 }
 
+// Parameters:
+//   - None.
+//
+// Returns:
+//   - result1 (*sql.Tx): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Tx and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (t *PostgresTransaction) Tx() *sql.Tx {
 	return t.tx
 }

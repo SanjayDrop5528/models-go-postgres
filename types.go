@@ -3,9 +3,10 @@
 //
 // File: types.go
 // Usage:
-//   This file defines the bidirectional type mapping between core engine generic DataType
-//   enums (model.TypeString, model.TypeInt, model.TypeDecimal, model.TypeJSON, etc.) and
-//   PostgreSQL-native SQL data types (VARCHAR, SERIAL, NUMERIC, JSONB, TIMESTAMPTZ, etc.).
+//
+//	This file defines the bidirectional type mapping between core engine generic DataType
+//	enums (model.TypeString, model.TypeInt, model.TypeDecimal, model.TypeJSON, etc.) and
+//	PostgreSQL-native SQL data types (VARCHAR, SERIAL, NUMERIC, JSONB, TIMESTAMPTZ, etc.).
 package postgres
 
 import (
@@ -18,13 +19,32 @@ import (
 // ToPostgresType maps core generic DataType to PostgreSQL SQL types.
 //
 // Purpose:
-//   Translates an engine schema attribute into a valid PostgreSQL column type string (e.g. VARCHAR(255), NUMERIC(10,2)).
+//
+//	Translates an engine schema attribute into a valid PostgreSQL column type string (e.g. VARCHAR(255), NUMERIC(10,2)).
 //
 // Where it is used:
 //   - Used by DDLGenerator when constructing CREATE TABLE and ADD COLUMN statements.
 //
 // When can it be used:
 //   - When translating core schema definitions into PostgreSQL table columns.
+//
+// Parameters:
+//   - attr (schema.SchemaAttribute): Input value used by the operation.
+//
+// Returns:
+//   - result1 (string): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by ToPostgresType and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func ToPostgresType(attr schema.SchemaAttribute) string {
 	switch attr.Type {
 	case model.TypeString:
@@ -89,13 +109,32 @@ func ToPostgresType(attr schema.SchemaAttribute) string {
 // FromPostgresType maps PostgreSQL information_schema data_type string back to core DataType.
 //
 // Purpose:
-//   Translates raw catalog type strings (e.g. "character varying", "timestamptz", "jsonb") into engine DataType constants.
+//
+//	Translates raw catalog type strings (e.g. "character varying", "timestamptz", "jsonb") into engine DataType constants.
 //
 // Where it is used:
 //   - Used by Introspector when reverse-engineering tables from information_schema.columns.
 //
 // When can it be used:
 //   - When converting database-discovered column types into generic engine types.
+//
+// Parameters:
+//   - pgType (string): Input value used by the operation.
+//
+// Returns:
+//   - result1 (model.DataType): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by FromPostgresType and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func FromPostgresType(pgType string) model.DataType {
 	switch pgType {
 	case "character varying", "varchar", "character", "char":

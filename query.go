@@ -54,10 +54,50 @@ type relationJoin = RelationJoin
 //
 // When can it be used:
 // Can be used when querying a table without orbital reference relation expansion.
+//
+// Parameters:
+//   - table (string): Input value used by the operation.
+//   - q (query.Query): Input value used by the operation.
+//
+// Returns:
+//   - result1 (string): Returned value.
+//   - result2 ([]any): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by BuildSelect and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (b *QueryBuilder) BuildSelect(table string, q query.Query) (string, []any) {
 	return b.BuildSelectWithRelations(table, q, nil)
 }
 
+// Parameters:
+//   - table (string): Input value used by the operation.
+//   - q (query.Query): Input value used by the operation.
+//   - relations ([]RelationJoin): Input value used by the operation.
+//
+// Returns:
+//   - result1 (string): Returned value.
+//   - result2 ([]any): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by BuildCountWithRelations and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (b *QueryBuilder) BuildCountWithRelations(table string, q query.Query, relations []RelationJoin) (string, []any) {
 	q.Fields = nil
 	q.ExcludedColumns = nil
@@ -84,6 +124,27 @@ func (b *QueryBuilder) BuildCountWithRelations(table string, q query.Query, rela
 //
 // When can it be used:
 // Can be used when relational data must be fetched and nested hierarchically in a single SQL query.
+//
+// Parameters:
+//   - table (string): Input value used by the operation.
+//   - q (query.Query): Input value used by the operation.
+//   - relations ([]relationJoin): Input value used by the operation.
+//
+// Returns:
+//   - result1 (string): Returned value.
+//   - result2 ([]any): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by BuildSelectWithRelations and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (b *QueryBuilder) BuildSelectWithRelations(table string, q query.Query, relations []relationJoin) (string, []any) {
 	var args []any
 	argIdx := 1
@@ -320,6 +381,26 @@ func (b *QueryBuilder) buildRelationJoinSQL(rel relationJoin) string {
 //
 // When can it be used:
 // Can be used whenever inserting a new row into a PostgreSQL table.
+//
+// Parameters:
+//   - table (string): Input value used by the operation.
+//   - data (map[string]any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (string): Returned value.
+//   - result2 ([]any): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by BuildInsert and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (b *QueryBuilder) BuildInsert(table string, data map[string]any) (string, []any) {
 	if len(data) == 0 {
 		return fmt.Sprintf("INSERT INTO %s DEFAULT VALUES RETURNING *;", quoteIdent(table)), nil
@@ -361,12 +442,55 @@ func (b *QueryBuilder) BuildInsert(table string, data map[string]any) (string, [
 //
 // When can it be used:
 // Can be used whenever updating an existing row by ID in PostgreSQL.
+//
+// Parameters:
+//   - table (string): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//   - data (map[string]any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (string): Returned value.
+//   - result2 ([]any): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by BuildUpdate and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (b *QueryBuilder) BuildUpdate(table string, id any, data map[string]any) (string, []any) {
 	return b.BuildUpdateByKey(table, "id", id, data)
 }
 
 // BuildUpdateByKey compiles an UPDATE using the runtime model's actual primary
 // key rather than assuming every table uses an `id` column.
+//
+// Parameters:
+//   - table (string): Input value used by the operation.
+//   - primaryKey (string): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//   - data (map[string]any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (string): Returned value.
+//   - result2 ([]any): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by BuildUpdateByKey and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (b *QueryBuilder) BuildUpdateByKey(table, primaryKey string, id any, data map[string]any) (string, []any) {
 	var setClauses []string
 	var args []any
@@ -415,11 +539,52 @@ func (b *QueryBuilder) BuildUpdateByKey(table, primaryKey string, id any, data m
 //
 // When can it be used:
 // Can be used whenever deleting a row by its primary key ID in PostgreSQL.
+//
+// Parameters:
+//   - table (string): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (string): Returned value.
+//   - result2 ([]any): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by BuildDelete and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (b *QueryBuilder) BuildDelete(table string, id any) (string, []any) {
 	return b.BuildDeleteByKey(table, "id", id)
 }
 
 // BuildDeleteByKey compiles a DELETE using the supplied runtime primary key.
+//
+// Parameters:
+//   - table (string): Input value used by the operation.
+//   - primaryKey (string): Input value used by the operation.
+//   - id (any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (string): Returned value.
+//   - result2 ([]any): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by BuildDeleteByKey and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (b *QueryBuilder) BuildDeleteByKey(table, primaryKey string, id any) (string, []any) {
 	if strings.TrimSpace(primaryKey) == "" {
 		primaryKey = "id"

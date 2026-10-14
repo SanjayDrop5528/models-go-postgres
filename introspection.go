@@ -43,6 +43,24 @@ type Introspector struct {
 //
 // When can it be used:
 //   - Whenever examining live PostgreSQL database structure without ORMs.
+//
+// Parameters:
+//   - db (*sql.DB): Input value used by the operation.
+//
+// Returns:
+//   - result1 (*Introspector): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by NewIntrospector and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func NewIntrospector(db *sql.DB) *Introspector {
 	return &Introspector{db: db}
 }
@@ -58,6 +76,24 @@ func NewIntrospector(db *sql.DB) *Introspector {
 //
 // When can it be used:
 //   - When executing custom catalog inspection queries.
+//
+// Parameters:
+//   - None.
+//
+// Returns:
+//   - result1 (*sql.DB): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by DB and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (i *Introspector) DB() *sql.DB {
 	return i.db
 }
@@ -73,6 +109,25 @@ func (i *Introspector) DB() *sql.DB {
 //
 // When can it be used:
 //   - When enumerating available schemas in a multi-tenant PostgreSQL database.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//
+// Returns:
+//   - result1 ([]string): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by ListSchemas and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (i *Introspector) ListSchemas(ctx context.Context) ([]string, error) {
 	if i.db == nil {
 		return nil, nil
@@ -111,6 +166,26 @@ func (i *Introspector) ListSchemas(ctx context.Context) ([]string, error) {
 //
 // When can it be used:
 //   - When discovering existing database tables to map into the models engine.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - schemas (...string): Input value used by the operation.
+//
+// Returns:
+//   - result1 ([]TableItem): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by ListTables and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (i *Introspector) ListTables(ctx context.Context, schemas ...string) ([]TableItem, error) {
 	if i.db == nil {
 		return nil, nil
@@ -179,6 +254,26 @@ func (i *Introspector) ListTables(ctx context.Context, schemas ...string) ([]Tab
 //
 // When can it be used:
 //   - When reverse-engineering an existing PostgreSQL table into engine schema models.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - tableName (string): Input value used by the operation.
+//
+// Returns:
+//   - result1 (*schema.Schema): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by IntrospectTable and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (i *Introspector) IntrospectTable(ctx context.Context, tableName string) (*schema.Schema, error) {
 	schemaName := "public"
 	tableOnly := tableName
@@ -213,6 +308,27 @@ func (i *Introspector) IntrospectTable(ctx context.Context, tableName string) (*
 }
 
 // IntrospectTableInSchema inspects columns, primary keys, and indexes for a specific schema and table.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - schemaName (string): Input value used by the operation.
+//   - tableName (string): Input value used by the operation.
+//
+// Returns:
+//   - result1 (*schema.Schema): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by IntrospectTableInSchema and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (i *Introspector) IntrospectTableInSchema(ctx context.Context, schemaName, tableName string) (*schema.Schema, error) {
 	if i.db == nil {
 		return nil, nil

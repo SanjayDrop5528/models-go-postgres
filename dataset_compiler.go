@@ -35,6 +35,24 @@ type PostgresDataSetCompiler struct{}
 //
 // When can it be used:
 // Can be used during application initialization or adapter registration to provide PostgreSQL compilation support.
+//
+// Parameters:
+//   - None.
+//
+// Returns:
+//   - result1 (*PostgresDataSetCompiler): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by NewPostgresDataSetCompiler and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func NewPostgresDataSetCompiler() *PostgresDataSetCompiler {
 	return &PostgresDataSetCompiler{}
 }
@@ -51,6 +69,27 @@ func NewPostgresDataSetCompiler() *PostgresDataSetCompiler {
 // When can it be used:
 // Can be used whenever a DataSet definition has been validated and planned by the DataSetPlanner and needs to be executed
 // or persisted in a PostgreSQL database.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - ast (*planner.QueryAST): Input value used by the operation.
+//   - ds (*domain.DataSet): Input value used by the operation.
+//
+// Returns:
+//   - result1 (*compiler.CompiledPipeline): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Compile and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (c *PostgresDataSetCompiler) Compile(ctx context.Context, ast *planner.QueryAST, ds *domain.DataSet) (*compiler.CompiledPipeline, error) {
 	if ast == nil {
 		return nil, domain.NewError(domain.ErrPipelineCompilationFailed, "cannot compile nil AST")
@@ -99,14 +138,14 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 
 	// 1. Projections
 	for _, p := range ast.Projections {
-		isManyRelation := false
+		isNestedRelation := false
 		for _, j := range ast.Joins {
 			if strings.EqualFold(j.Alias, p.SourceTable) && (strings.EqualFold(j.Cardinality, "MANY") || strings.EqualFold(j.OutputFormat, "JSON_ARRAY") || strings.EqualFold(j.OutputFormat, "OBJECT")) {
-				isManyRelation = true
+				isNestedRelation = true
 				break
 			}
 		}
-		if isManyRelation {
+		if isNestedRelation {
 			continue
 		}
 		colExpr := fmt.Sprintf("\"%s\".\"%s\"", p.SourceTable, p.SourceField)
@@ -118,8 +157,10 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 
 	// Project relations according to the requested JSON shape.
 	for _, j := range ast.Joins {
+		relationFields := relationProjections(ast, j)
 		if strings.EqualFold(j.OutputFormat, "OBJECT") && !strings.EqualFold(j.Cardinality, "MANY") {
-			selectCols = append(selectCols, fmt.Sprintf(`CASE WHEN "%s"."%s" IS NULL THEN NULL ELSE to_jsonb("%s".*) END AS "%s"`, j.Alias, j.ToField, j.Alias, j.Alias))
+			objectExpr := postgresJSONObject(j.Alias, relationFields)
+			selectCols = append(selectCols, fmt.Sprintf(`CASE WHEN "%s"."%s" IS NULL THEN NULL ELSE %s END AS "%s"`, j.Alias, j.ToField, objectExpr, j.Alias))
 			continue
 		}
 		if !strings.EqualFold(j.Cardinality, "MANY") && !strings.EqualFold(j.OutputFormat, "JSON_ARRAY") {
@@ -134,7 +175,8 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 		for k, v := range j.JoinFilter {
 			whereCondition += " AND " + formatFilterCondition(itemAlias, k, v)
 		}
-		selectCols = append(selectCols, fmt.Sprintf(`COALESCE((SELECT jsonb_agg(to_jsonb("%s".*)) FROM %s AS "%s" WHERE %s), '[]'::jsonb) AS "%s"`, itemAlias, targetTbl, itemAlias, whereCondition, j.Alias))
+		itemExpr := postgresJSONObject(itemAlias, relationFields)
+		selectCols = append(selectCols, fmt.Sprintf(`COALESCE((SELECT jsonb_agg(%s) FROM %s AS "%s" WHERE %s), '[]'::jsonb) AS "%s"`, itemExpr, targetTbl, itemAlias, whereCondition, j.Alias))
 	}
 
 	// 2. Custom Columns
@@ -261,6 +303,39 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 	}
 
 	return sql + ";"
+}
+
+// relationProjections returns fields selected from a specific joined relation.
+func relationProjections(ast *planner.QueryAST, join planner.ASTJoin) []planner.ASTProjection {
+	var fields []planner.ASTProjection
+	for _, projection := range ast.Projections {
+		if strings.EqualFold(projection.SourceTable, join.Alias) {
+			fields = append(fields, projection)
+		}
+	}
+	return fields
+}
+
+// relationProjectionKey returns the JSON key for a selected relation field.
+func relationProjectionKey(join planner.ASTJoin, projection planner.ASTProjection) string {
+	if projection.Alias == "" || projection.Alias == projection.SourceField || strings.EqualFold(projection.Alias, join.Alias+"_"+projection.SourceField) {
+		return projection.SourceField
+	}
+	return projection.Alias
+}
+
+// postgresJSONObject builds a JSON object containing only selected relation fields.
+func postgresJSONObject(tableAlias string, fields []planner.ASTProjection) string {
+	if len(fields) == 0 {
+		return `'{}'::jsonb`
+	}
+	args := make([]string, 0, len(fields)*2)
+	join := planner.ASTJoin{Alias: strings.TrimSuffix(tableAlias, "_many")}
+	for _, field := range fields {
+		key := strings.ReplaceAll(relationProjectionKey(join, field), "'", "''")
+		args = append(args, fmt.Sprintf("'%s'", key), fmt.Sprintf(`"%s"."%s"`, tableAlias, field.SourceField))
+	}
+	return "jsonb_build_object(" + strings.Join(args, ", ") + ")"
 }
 
 func buildPostgresJoinCondition(j planner.ASTJoin, fromAlias, toAlias string) string {
@@ -615,6 +690,27 @@ $$;`, baseSchema, baseSchema, cleanName, strings.Join(paramDefs, ", "), querySQL
 //
 // When can it be used:
 // Can be used whenever an application holds a PostgresAdapter instance and needs to compile a dataset.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - ast (*planner.QueryAST): Input value used by the operation.
+//   - ds (*domain.DataSet): Input value used by the operation.
+//
+// Returns:
+//   - result1 (*compiler.CompiledPipeline): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by CompileDataSet and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) CompileDataSet(ctx context.Context, ast *planner.QueryAST, ds *domain.DataSet) (*compiler.CompiledPipeline, error) {
 	return NewPostgresDataSetCompiler().Compile(ctx, ast, ds)
 }
@@ -629,6 +725,24 @@ func (a *PostgresAdapter) CompileDataSet(ctx context.Context, ast *planner.Query
 //
 // When can it be used:
 // Can be used when initializing the dataset engine and registering the PostgreSQL adapter compiler.
+//
+// Parameters:
+//   - None.
+//
+// Returns:
+//   - result1 (adapter.DataSetCompiler): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by DataSetCompiler and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - This function does not return an error.
+//
+// Note:
+//   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (a *PostgresAdapter) DataSetCompiler() adapter.DataSetCompiler {
 	return &genericCompilerWrapper{c: NewPostgresDataSetCompiler()}
 }
@@ -647,6 +761,27 @@ type genericCompilerWrapper struct {
 //
 // When can it be used:
 // Can be used whenever compiling across module boundaries where interface{} decoupling is employed.
+//
+// Parameters:
+//   - ctx (context.Context): Input value used by the operation.
+//   - ast (any): Input value used by the operation.
+//   - ds (any): Input value used by the operation.
+//
+// Returns:
+//   - result1 (any): Returned value.
+//   - result2 (error): Returned value.
+//
+// Business Rules:
+//   - Follows the invariants documented by Compile and its owning package.
+//
+// Side Effects:
+//   - Does not intentionally mutate caller-owned input; configured dependencies may still be consulted.
+//
+// Errors:
+//   - Returns validation, configuration, context, or underlying dependency errors.
+//
+// Note:
+//   - The context controls cancellation and request lifetime.
 func (w *genericCompilerWrapper) Compile(ctx context.Context, ast any, ds any) (any, error) {
 	qAst, _ := ast.(*planner.QueryAST)
 	dSet, _ := ds.(*domain.DataSet)
