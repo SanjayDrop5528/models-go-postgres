@@ -271,8 +271,8 @@ func TestPostgresDataSetCompiler_AggregatesAndJoinedGroupByUseAliases(t *testing
 		SelectedList: []domain.SelectedField{
 			{Field: "departments.name", HeaderName: "department_name"},
 		},
-		Filter: map[string]any{
-			"departments.is_active": true,
+		Filter: []any{
+			map[string]any{"departments.is_active": true},
 		},
 		CustomColumns: []domain.CustomColumn{
 			{

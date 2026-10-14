@@ -47,7 +47,7 @@ import (
 //   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func ToPostgresType(attr schema.SchemaAttribute) string {
 	switch attr.Type {
-	case model.TypeString:
+	case model.TypeString, model.TypeEmail:
 		if attr.Length > 0 {
 			return fmt.Sprintf("VARCHAR(%d)", attr.Length)
 		}
