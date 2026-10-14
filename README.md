@@ -4,6 +4,31 @@
 
 `models-go-postgres` provides the PostgreSQL database adapter for `models-go-engine`. It supports schema introspection, migration DDL generation (`ALTER TABLE`, `ADD FOREIGN KEY`, `ALTER COLUMN TYPE`), parameterized SQL execution, and Stored Procedure / Stored Function DDL compilation (`sp_...`, `fn_...`).
 
+## Prerequisites
+
+- Go 1.20 or newer.
+- PostgreSQL 13 or newer with a reachable database.
+- A PostgreSQL DSN and a user with the permissions required for the selected operation.
+- `pgcrypto` and `uuid-ossp` extensions when using features that require them.
+
+## Usage Steps
+
+1. Configure a PostgreSQL DSN and allowed schemas.
+2. Create the adapter with `postgres.NewPostgresAdapter(dsn)`.
+3. Optionally restrict introspection with `WithSchemas(...)`.
+4. Call `Connect(ctx)` and check the returned error.
+5. Register the adapter and `PostgresDataSetCompiler` with `models-go-engine`.
+6. Run CRUD, dataset preview/execute, or schema migration operations.
+7. Run `go test ./...` to verify the adapter.
+
+## Core Functionality
+
+- PostgreSQL connection pooling and parameterized execution.
+- Schema introspection and transactional migration DDL.
+- Query AST compilation to PostgreSQL SQL.
+- Stored procedure/function generation for saved datasets.
+- Explicit and automatic relation loading for object and array results.
+
 ---
 
 ## 🛠️ Key Exported Functions & Methods Reference
