@@ -165,6 +165,13 @@ func (g *DDLGenerator) GenerateStatement(op diff.SchemaOperation) (string, error
 			return "", fmt.Errorf("invalid attribute payload for ALTER_COLUMN_TYPE")
 		}
 		pgType := ToPostgresType(attr)
+		if strings.EqualFold(pgType, "JSONB") {
+			// PostgreSQL does not implicitly cast varchar to jsonb. Preserve
+			// existing JSON text and wrap legacy plain strings as JSON strings.
+			col := quoteIdent(attr.Name)
+			using := fmt.Sprintf("CASE WHEN %s IS NULL OR btrim(%s) = '' THEN '[]'::jsonb WHEN left(btrim(%s), 1) IN ('[', '{') THEN %s::jsonb ELSE to_jsonb(%s) END", col, col, col, col, col)
+			return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s;", table, col, pgType, using), nil
+		}
 		return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s;", table, quoteIdent(attr.Name), pgType), nil
 
 	case diff.OpAlterColumnNullable:
