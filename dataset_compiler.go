@@ -100,6 +100,8 @@ func (c *PostgresDataSetCompiler) Compile(ctx context.Context, ast *planner.Quer
 		saveMode = domain.SaveModeQuery
 	}
 
+	enrichASTJoinTypes(ast, ds)
+
 	execQuery := c.buildSelectSQL(ast, false, false)
 	refQuery := c.buildSelectSQL(ast, true, false)
 	routineQuery := c.buildSelectSQL(ast, false, true)
@@ -348,26 +350,313 @@ func postgresJSONObject(tableAlias string, fields []planner.ASTProjection) strin
 	return "jsonb_build_object(" + strings.Join(args, ", ") + ")"
 }
 
-func buildPostgresJoinCondition(j planner.ASTJoin, fromAlias, toAlias string) string {
-	from := fmt.Sprintf(`"%s"."%s"`, fromAlias, j.FromField)
-	to := fmt.Sprintf(`"%s"."%s"`, toAlias, j.ToField)
-	if !j.ConvertString {
-		return fmt.Sprintf("%s = %s", from, to)
+// PGStructureCategory classifies the 5 fundamental PostgreSQL structures.
+type PGStructureCategory int
+
+const (
+	PGStructureScalar PGStructureCategory = iota
+	PGStructureArray
+	PGStructureJSONArray
+	PGStructureJSONObject
+	PGStructureJSONArrayOfObjects
+)
+
+// classifyPostgresStructure determines the structure category and base type for a PostgreSQL column.
+func classifyPostgresStructure(dataType string) (PGStructureCategory, string) {
+	dt := strings.ToUpper(strings.TrimSpace(dataType))
+	if dt == "" {
+		return PGStructureScalar, ""
 	}
 
-	switch strings.ToUpper(strings.TrimSpace(j.CastMode)) {
-	case "ANY_FROM": // FROM is the array; TARGET is the scalar.
-		return fmt.Sprintf("CAST(%s AS TEXT) = ANY(CAST(%s AS TEXT[]))", to, from)
-	case "ANY_TO": // TARGET is the array; FROM is the scalar.
-		return fmt.Sprintf("CAST(%s AS TEXT) = ANY(CAST(%s AS TEXT[]))", from, to)
-	case "ANY_BOTH": // Both fields are arrays; match when they overlap.
-		return fmt.Sprintf("CAST(%s AS TEXT[]) && CAST(%s AS TEXT[])", from, to)
-	case "FROM_ONLY":
-		return fmt.Sprintf("CAST(%s AS TEXT) = %s", from, to)
-	case "TO_ONLY":
-		return fmt.Sprintf("%s = CAST(%s AS TEXT)", from, to)
+	// 1. JSON Array of Objects ([{}])
+	if strings.Contains(dt, "OBJECT[]") || strings.Contains(dt, "ARRAY_OF_OBJECTS") ||
+		strings.Contains(dt, "JSON_ARRAY_OF_OBJECTS") || dt == "[{}]" {
+		return PGStructureJSONArrayOfObjects, "JSONB"
+	}
+
+	// 2. JSON Array of scalars (JSONB storing ["id1", "id2"])
+	if dt == "JSON_ARRAY" || dt == "JSONB_ARRAY" || dt == "JSON[]" || dt == "JSONB[]" || dt == "[]" {
+		return PGStructureJSONArray, "JSONB"
+	}
+
+	// 3. JSON Object (JSONB storing {"id": "..."})
+	if dt == "JSON_OBJECT" || dt == "JSONB_OBJECT" || dt == "{}" || dt == "JSON" || dt == "JSONB" || dt == "CUSTOM_TYPE" {
+		return PGStructureJSONObject, "JSONB"
+	}
+
+	// 4. Native Array (UUID[], TEXT[], INTEGER[], etc.)
+	if strings.HasSuffix(dt, "[]") || strings.HasPrefix(dt, "_") || dt == "ARRAY" {
+		base := strings.TrimSuffix(dt, "[]")
+		base = strings.TrimPrefix(base, "_")
+		if base == "" || base == "ARRAY" {
+			base = "TEXT"
+		}
+		return PGStructureArray, base
+	}
+
+	// 5. Scalar
+	return PGStructureScalar, dt
+}
+
+// isTextType returns true if data type is textual.
+func isTextType(t string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(t))
+	return upper == "TEXT" || upper == "STRING" || upper == "VARCHAR" || upper == "CHAR"
+}
+
+// isIntegerType returns true if data type is integer.
+func isIntegerType(t string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(t))
+	return upper == "INT" || upper == "INTEGER" || upper == "BIGINT" || upper == "SMALLINT" || upper == "SERIAL" || upper == "BIGSERIAL"
+}
+
+// enrichASTJoinTypes introspects selected list and projections to populate join column data types.
+func enrichASTJoinTypes(ast *planner.QueryAST, ds *domain.DataSet) {
+	if ast == nil {
+		return
+	}
+	for i := range ast.Joins {
+		j := &ast.Joins[i]
+		if j.FromFieldDataType == "" {
+			j.FromFieldDataType = lookupFieldDataType(j.FromTable, j.FromField, ast, ds)
+		}
+		if j.ToFieldDataType == "" {
+			j.ToFieldDataType = lookupFieldDataType(j.ToTable, j.ToField, ast, ds)
+			if j.ToFieldDataType == "" {
+				j.ToFieldDataType = lookupFieldDataType(j.Alias, j.ToField, ast, ds)
+			}
+		}
+	}
+}
+
+func lookupFieldDataType(table, field string, ast *planner.QueryAST, ds *domain.DataSet) string {
+	tblClean := strings.ToLower(table)
+	if idx := strings.Index(tblClean, "."); idx >= 0 {
+		tblClean = tblClean[idx+1:]
+	}
+	fldLower := strings.ToLower(field)
+
+	// Check SelectedList
+	if ds != nil {
+		for _, s := range ds.SelectedList {
+			sField := strings.ToLower(s.Field)
+			if s.DataType != "" {
+				if sField == tblClean+"."+fldLower || sField == fldLower || strings.EqualFold(s.HeaderName, field) {
+					return s.DataType
+				}
+			}
+		}
+	}
+
+	// Check Projections
+	if ast != nil {
+		for _, p := range ast.Projections {
+			pTable := strings.ToLower(p.SourceTable)
+			if idx := strings.Index(pTable, "."); idx >= 0 {
+				pTable = pTable[idx+1:]
+			}
+			if (pTable == tblClean || pTable == strings.ToLower(table)) && strings.EqualFold(p.SourceField, field) {
+				if p.DataType != "" {
+					return p.DataType
+				}
+			}
+		}
+	}
+
+	// Heuristics
+	if fldLower == "id" || strings.HasSuffix(fldLower, "_id") {
+		return "UUID"
+	}
+	if strings.Contains(fldLower, "array") || strings.Contains(fldLower, "plant_mine") || strings.Contains(fldLower, "locations") || strings.Contains(fldLower, "days") {
+		return "ARRAY"
+	}
+	if strings.HasSuffix(fldLower, "_at") || strings.HasSuffix(fldLower, "_date") || strings.Contains(fldLower, "date") {
+		return "DATE"
+	}
+	if strings.HasPrefix(fldLower, "is_") || strings.HasPrefix(fldLower, "has_") {
+		return "BOOLEAN"
+	}
+
+	return ""
+}
+
+// buildPostgresJoinCondition generates the type-aware SQL join condition.
+func buildPostgresJoinCondition(j planner.ASTJoin, fromAlias, toAlias string) string {
+	fromCol := fmt.Sprintf(`"%s"."%s"`, fromAlias, j.FromField)
+	toCol := fmt.Sprintf(`"%s"."%s"`, toAlias, j.ToField)
+
+	fromCat, fromBase := classifyPostgresStructure(j.FromFieldDataType)
+	toCat, toBase := classifyPostgresStructure(j.ToFieldDataType)
+
+	// If explicit relationship operator is specified, honor it:
+	if op := strings.TrimSpace(j.RelationshipOp); op != "" {
+		return resolveExplicitOperatorCondition(op, fromCol, toCol, fromCat, toCat, fromBase, toBase)
+	}
+
+	castMode := strings.ToUpper(strings.TrimSpace(j.CastMode))
+
+	fromIsArray := fromCat == PGStructureArray || fromCat == PGStructureJSONArray || fromCat == PGStructureJSONArrayOfObjects || castMode == "ANY_FROM" || castMode == "ANY_BOTH"
+	toIsArray := toCat == PGStructureArray || toCat == PGStructureJSONArray || toCat == PGStructureJSONArrayOfObjects || castMode == "ANY_TO" || castMode == "ANY_BOTH"
+
+	// Auto-correct inverted ANY_TO when source is array or target is scalar PK "id"
+	if castMode == "ANY_TO" && (fromCat == PGStructureArray || strings.EqualFold(j.ToField, "id") || strings.Contains(strings.ToLower(j.FromField), "array") || strings.Contains(strings.ToLower(j.FromField), "plant_mine")) {
+		fromIsArray = true
+		toIsArray = false
+		castMode = "ANY_FROM"
+	}
+
+	// 1. Array Overlap (Both are arrays): a && b
+	if (fromIsArray && toIsArray) || castMode == "ANY_BOTH" {
+		if fromBase != "" && fromBase == toBase && fromBase != "ARRAY" {
+			return fmt.Sprintf("%s && %s", fromCol, toCol)
+		}
+		return fmt.Sprintf("CAST(%s AS TEXT[]) && CAST(%s AS TEXT[])", fromCol, toCol)
+	}
+
+	// 2. Source is Array, Target is Scalar: b = ANY(a)
+	if fromIsArray && !toIsArray {
+		if fromCat == PGStructureJSONArray {
+			return fmt.Sprintf("%s ? CAST(%s AS TEXT)", fromCol, toCol)
+		}
+		if fromCat == PGStructureJSONArrayOfObjects {
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM jsonb_array_elements(%s) AS elem WHERE elem->>'id' = CAST(%s AS TEXT))", fromCol, toCol)
+		}
+		if !j.ConvertString && castMode == "" && fromBase != "" && fromBase == toBase && fromBase != "ARRAY" {
+			return fmt.Sprintf("%s = ANY(%s)", toCol, fromCol)
+		}
+		return fmt.Sprintf("CAST(%s AS TEXT) = ANY(CAST(%s AS TEXT[]))", toCol, fromCol)
+	}
+
+	// 3. Target is Array, Source is Scalar: a = ANY(b)
+	if toIsArray && !fromIsArray {
+		if toCat == PGStructureJSONArray {
+			return fmt.Sprintf("%s ? CAST(%s AS TEXT)", toCol, fromCol)
+		}
+		if toCat == PGStructureJSONArrayOfObjects {
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM jsonb_array_elements(%s) AS elem WHERE elem->>'id' = CAST(%s AS TEXT))", toCol, fromCol)
+		}
+		if !j.ConvertString && castMode == "" && toBase != "" && toBase == fromBase && toBase != "ARRAY" {
+			return fmt.Sprintf("%s = ANY(%s)", fromCol, toCol)
+		}
+		return fmt.Sprintf("CAST(%s AS TEXT) = ANY(CAST(%s AS TEXT[]))", fromCol, toCol)
+	}
+
+	// 4. JSON Object relationships: (a->>'id')::UUID = b
+	if fromCat == PGStructureJSONObject && toCat == PGStructureScalar {
+		if toBase == "UUID" {
+			return fmt.Sprintf("(%s->>'id')::UUID = %s", fromCol, toCol)
+		}
+		return fmt.Sprintf("(%s->>'id') = CAST(%s AS TEXT)", fromCol, toCol)
+	}
+	if toCat == PGStructureJSONObject && fromCat == PGStructureScalar {
+		if fromBase == "UUID" {
+			return fmt.Sprintf("(%s->>'id')::UUID = %s", toCol, fromCol)
+		}
+		return fmt.Sprintf("(%s->>'id') = CAST(%s AS TEXT)", toCol, fromCol)
+	}
+
+	// 5. Scalar vs Scalar
+	if castMode == "FROM_ONLY" {
+		return fmt.Sprintf("CAST(%s AS TEXT) = %s", fromCol, toCol)
+	}
+	if castMode == "TO_ONLY" {
+		return fmt.Sprintf("%s = CAST(%s AS TEXT)", fromCol, toCol)
+	}
+
+	// Clean type matching without redundant casts when types are compatible
+	if fromBase != "" && toBase != "" {
+		if fromBase == toBase {
+			return fmt.Sprintf("%s = %s", fromCol, toCol)
+		}
+		if isIntegerType(fromBase) && isIntegerType(toBase) {
+			return fmt.Sprintf("%s = %s", fromCol, toCol)
+		}
+		if fromBase == "UUID" && isTextType(toBase) {
+			return fmt.Sprintf("CAST(%s AS TEXT) = %s", fromCol, toCol)
+		}
+		if isTextType(fromBase) && toBase == "UUID" {
+			return fmt.Sprintf("%s = CAST(%s AS TEXT)", fromCol, toCol)
+		}
+	}
+
+	if j.ConvertString || castMode == "BOTH" {
+		return fmt.Sprintf("CAST(%s AS TEXT) = CAST(%s AS TEXT)", fromCol, toCol)
+	}
+
+	return fmt.Sprintf("%s = %s", fromCol, toCol)
+}
+
+func resolveExplicitOperatorCondition(op, fromCol, toCol string, fromCat, toCat PGStructureCategory, fromBase, toBase string) string {
+	cleanOp := strings.ToUpper(strings.TrimSpace(op))
+	switch cleanOp {
+	case "=", "EQ", "EQUAL":
+		if fromBase != "" && toBase != "" && fromBase != toBase {
+			if fromBase == "UUID" && isTextType(toBase) {
+				return fmt.Sprintf("CAST(%s AS TEXT) = %s", fromCol, toCol)
+			}
+			if isTextType(fromBase) && toBase == "UUID" {
+				return fmt.Sprintf("%s = CAST(%s AS TEXT)", fromCol, toCol)
+			}
+			return fmt.Sprintf("CAST(%s AS TEXT) = CAST(%s AS TEXT)", fromCol, toCol)
+		}
+		return fmt.Sprintf("%s = %s", fromCol, toCol)
+
+	case "<>", "!=", "NEQ", "NOT_EQUAL":
+		return fmt.Sprintf("%s <> %s", fromCol, toCol)
+
+	case "ANY", "= ANY":
+		if fromCat == PGStructureArray || fromCat == PGStructureJSONArray {
+			if fromBase != "" && fromBase == toBase && fromBase != "ARRAY" {
+				return fmt.Sprintf("%s = ANY(%s)", toCol, fromCol)
+			}
+			return fmt.Sprintf("CAST(%s AS TEXT) = ANY(CAST(%s AS TEXT[]))", toCol, fromCol)
+		}
+		if toBase != "" && toBase == fromBase && toBase != "ARRAY" {
+			return fmt.Sprintf("%s = ANY(%s)", fromCol, toCol)
+		}
+		return fmt.Sprintf("CAST(%s AS TEXT) = ANY(CAST(%s AS TEXT[]))", fromCol, toCol)
+
+	case "ALL", "= ALL":
+		if fromCat == PGStructureArray {
+			return fmt.Sprintf("%s = ALL(%s)", toCol, fromCol)
+		}
+		return fmt.Sprintf("%s = ALL(%s)", fromCol, toCol)
+
+	case "&&", "OVERLAP", "OVERLAPS":
+		if fromBase != "" && fromBase == toBase && fromBase != "ARRAY" {
+			return fmt.Sprintf("%s && %s", fromCol, toCol)
+		}
+		return fmt.Sprintf("CAST(%s AS TEXT[]) && CAST(%s AS TEXT[])", fromCol, toCol)
+
+	case "@>", "CONTAINS":
+		return fmt.Sprintf("%s @> %s", fromCol, toCol)
+
+	case "<@", "CONTAINED_BY":
+		return fmt.Sprintf("%s <@ %s", fromCol, toCol)
+
+	case "?":
+		if toCat == PGStructureJSONArray || toCat == PGStructureJSONObject {
+			return fmt.Sprintf("%s ? CAST(%s AS TEXT)", toCol, fromCol)
+		}
+		return fmt.Sprintf("%s ? CAST(%s AS TEXT)", fromCol, toCol)
+
+	case "?|":
+		return fmt.Sprintf("%s ?| CAST(%s AS TEXT[])", fromCol, toCol)
+
+	case "?&":
+		return fmt.Sprintf("%s ?& CAST(%s AS TEXT[])", fromCol, toCol)
+
+	case "EXISTS":
+		if fromCat == PGStructureJSONArrayOfObjects {
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM jsonb_array_elements(%s) AS elem WHERE elem->>'id' = CAST(%s AS TEXT))", fromCol, toCol)
+		}
+		return fmt.Sprintf("EXISTS (SELECT 1 FROM jsonb_array_elements(%s) AS elem WHERE elem->>'id' = CAST(%s AS TEXT))", toCol, fromCol)
+
+	case "IS NOT DISTINCT FROM":
+		return fmt.Sprintf("%s IS NOT DISTINCT FROM %s", fromCol, toCol)
+
 	default:
-		return fmt.Sprintf("CAST(%s AS TEXT) = CAST(%s AS TEXT)", from, to)
+		return fmt.Sprintf("%s %s %s", fromCol, op, toCol)
 	}
 }
 

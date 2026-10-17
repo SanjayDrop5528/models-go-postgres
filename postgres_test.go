@@ -764,3 +764,366 @@ func TestPostgresDataSetCompiler_AllCustomAndAggregateFunctions(t *testing.T) {
 		}
 	}
 }
+
+func TestPostgresDataSetCompiler_TypeAwareRelationshipResolver(t *testing.T) {
+	c := postgres.NewPostgresDataSetCompiler()
+
+	t.Run("Scalar UUID = Scalar UUID generates direct equality", func(t *testing.T) {
+		ds := &domain.DataSet{
+			BaseCollection: domain.BaseCollection{Schema: "iam", Collection: "employees"},
+			JoinCollections: []domain.JoinCollection{
+				{
+					Schema: "iam", FromCollection: "employees", FromCollectionField: "designation_id",
+					ToCollection: "designations", ToCollectionField: "id", NamedAs: "designations_details",
+					FromFieldDataType: "UUID", ToFieldDataType: "UUID",
+					Cardinality: "NONE", OutputFormat: "NONE",
+				},
+			},
+			SelectedList: []domain.SelectedField{
+				{Field: "employees.id", DataType: "UUID"},
+				{Field: "designations_details.name", DataType: "STRING"},
+			},
+		}
+		ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := c.Compile(context.Background(), ast, ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `LEFT JOIN "iam"."designations" AS "designations_details" ON "employees"."designation_id" = "designations_details"."id"`
+		if !strings.Contains(res.ExecutableQuery, want) {
+			t.Errorf("expected clean direct equality %s, got:\n%s", want, res.ExecutableQuery)
+		}
+	})
+
+	t.Run("Scalar UUID vs TEXT casts UUID side", func(t *testing.T) {
+		ds := &domain.DataSet{
+			BaseCollection: domain.BaseCollection{Schema: "iam", Collection: "employees"},
+			JoinCollections: []domain.JoinCollection{
+				{
+					Schema: "shared", FromCollection: "employees", FromCollectionField: "country",
+					ToCollection: "countries", ToCollectionField: "code", NamedAs: "countries_details",
+					FromFieldDataType: "UUID", ToFieldDataType: "TEXT",
+					Cardinality: "NONE", OutputFormat: "NONE",
+				},
+			},
+			SelectedList: []domain.SelectedField{
+				{Field: "employees.id", DataType: "UUID"},
+				{Field: "countries_details.name", DataType: "STRING"},
+			},
+		}
+		ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := c.Compile(context.Background(), ast, ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `ON CAST("employees"."country" AS TEXT) = "countries_details"."code"`
+		if !strings.Contains(res.ExecutableQuery, want) {
+			t.Errorf("expected single-side cast %s, got:\n%s", want, res.ExecutableQuery)
+		}
+	})
+
+	t.Run("Array to Scalar subquery generates target = ANY(source)", func(t *testing.T) {
+		ds := &domain.DataSet{
+			BaseCollection: domain.BaseCollection{Schema: "iam", Collection: "employees"},
+			JoinCollections: []domain.JoinCollection{
+				{
+					Schema: "master", FromCollection: "employees", FromCollectionField: "primary_plant_mine",
+					ToCollection: "plant_mine", ToCollectionField: "id", NamedAs: "plant_mine_details",
+					FromFieldDataType: "ARRAY", ToFieldDataType: "UUID",
+					Cardinality: "MANY", OutputFormat: "JSON_ARRAY",
+				},
+			},
+			SelectedList: []domain.SelectedField{
+				{Field: "employees.id", DataType: "UUID"},
+				{Field: "employees.primary_plant_mine", DataType: "ARRAY"},
+				{Field: "plant_mine_details.name", HeaderName: "plant_mine_name_alias", DataType: "STRING"},
+			},
+		}
+		ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := c.Compile(context.Background(), ast, ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `WHERE CAST("plant_mine_details_many"."id" AS TEXT) = ANY(CAST("employees"."primary_plant_mine" AS TEXT[]))`
+		if !strings.Contains(res.ExecutableQuery, want) {
+			t.Errorf("expected correlated subquery scalar = ANY(array) condition %s, got:\n%s", want, res.ExecutableQuery)
+		}
+	})
+
+	t.Run("Inverted ANY_TO auto-corrects when source is array", func(t *testing.T) {
+		ds := &domain.DataSet{
+			BaseCollection: domain.BaseCollection{Schema: "iam", Collection: "employees"},
+			JoinCollections: []domain.JoinCollection{
+				{
+					Schema: "master", FromCollection: "employees", FromCollectionField: "primary_plant_mine",
+					ToCollection: "plant_mine", ToCollectionField: "id", NamedAs: "plant_mine_details",
+					ConvertToString: true, CastMode: "ANY_TO", // Inverted flag from client
+					Cardinality: "MANY", OutputFormat: "JSON_ARRAY",
+				},
+			},
+			SelectedList: []domain.SelectedField{
+				{Field: "employees.id", DataType: "UUID"},
+				{Field: "employees.primary_plant_mine", DataType: "ARRAY"},
+				{Field: "plant_mine_details.name", HeaderName: "plant_mine_name_alias", DataType: "STRING"},
+			},
+		}
+		ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := c.Compile(context.Background(), ast, ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Must NOT contain CAST("employees"."primary_plant_mine" AS TEXT) = ANY(CAST("plant_mine_details_many"."id" AS TEXT[]))
+		bad := `CAST("employees"."primary_plant_mine" AS TEXT) = ANY(CAST("plant_mine_details_many"."id" AS TEXT[]))`
+		if strings.Contains(res.ExecutableQuery, bad) {
+			t.Fatalf("inverted ANY_TO was not corrected, found bad condition: %s", bad)
+		}
+		want := `WHERE CAST("plant_mine_details_many"."id" AS TEXT) = ANY(CAST("employees"."primary_plant_mine" AS TEXT[]))`
+		if !strings.Contains(res.ExecutableQuery, want) {
+			t.Errorf("expected auto-corrected condition %s, got:\n%s", want, res.ExecutableQuery)
+		}
+	})
+
+	t.Run("Array overlap && operator", func(t *testing.T) {
+		ds := &domain.DataSet{
+			BaseCollection: domain.BaseCollection{Schema: "public", Collection: "users"},
+			JoinCollections: []domain.JoinCollection{
+				{
+					FromCollection: "users", FromCollectionField: "skill_tags",
+					ToCollection: "jobs", ToCollectionField: "required_tags", NamedAs: "jobs_details",
+					FromFieldDataType: "TEXT[]", ToFieldDataType: "TEXT[]", RelationshipOp: "&&",
+					Cardinality: "NONE", OutputFormat: "NONE",
+				},
+			},
+			SelectedList: []domain.SelectedField{
+				{Field: "users.id", DataType: "UUID"},
+				{Field: "jobs_details.title", DataType: "STRING"},
+			},
+		}
+		ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := c.Compile(context.Background(), ast, ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `"users"."skill_tags" && "jobs_details"."required_tags"`
+		if !strings.Contains(res.ExecutableQuery, want) {
+			t.Errorf("expected overlap operator %s, got:\n%s", want, res.ExecutableQuery)
+		}
+	})
+
+	t.Run("JSONB array operator ?", func(t *testing.T) {
+		ds := &domain.DataSet{
+			BaseCollection: domain.BaseCollection{Schema: "public", Collection: "projects"},
+			JoinCollections: []domain.JoinCollection{
+				{
+					FromCollection: "projects", FromCollectionField: "member_ids",
+					ToCollection: "members", ToCollectionField: "id", NamedAs: "members_details",
+					FromFieldDataType: "JSON_ARRAY", ToFieldDataType: "UUID",
+					Cardinality: "NONE", OutputFormat: "NONE",
+				},
+			},
+			SelectedList: []domain.SelectedField{
+				{Field: "projects.id", DataType: "UUID"},
+				{Field: "members_details.name", DataType: "STRING"},
+			},
+		}
+		ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := c.Compile(context.Background(), ast, ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `"projects"."member_ids" ? CAST("members_details"."id" AS TEXT)`
+		if !strings.Contains(res.ExecutableQuery, want) {
+			t.Errorf("expected JSONB ? operator %s, got:\n%s", want, res.ExecutableQuery)
+		}
+	})
+
+	t.Run("JSONB object extraction operator ->>", func(t *testing.T) {
+		ds := &domain.DataSet{
+			BaseCollection: domain.BaseCollection{Schema: "public", Collection: "events"},
+			JoinCollections: []domain.JoinCollection{
+				{
+					FromCollection: "events", FromCollectionField: "metadata",
+					ToCollection: "venues", ToCollectionField: "id", NamedAs: "venue_details",
+					FromFieldDataType: "JSON_OBJECT", ToFieldDataType: "UUID",
+					Cardinality: "NONE", OutputFormat: "NONE",
+				},
+			},
+			SelectedList: []domain.SelectedField{
+				{Field: "events.id", DataType: "UUID"},
+				{Field: "venue_details.name", DataType: "STRING"},
+			},
+		}
+		ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := c.Compile(context.Background(), ast, ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `("events"."metadata"->>'id')::UUID = "venue_details"."id"`
+		if !strings.Contains(res.ExecutableQuery, want) {
+			t.Errorf("expected JSON object extraction %s, got:\n%s", want, res.ExecutableQuery)
+		}
+	})
+
+	t.Run("JSONB array of objects EXISTS operator", func(t *testing.T) {
+		ds := &domain.DataSet{
+			BaseCollection: domain.BaseCollection{Schema: "public", Collection: "orders"},
+			JoinCollections: []domain.JoinCollection{
+				{
+					FromCollection: "orders", FromCollectionField: "recipients",
+					ToCollection: "users", ToCollectionField: "id", NamedAs: "user_details",
+					FromFieldDataType: "JSON_ARRAY_OF_OBJECTS", ToFieldDataType: "UUID",
+					Cardinality: "NONE", OutputFormat: "NONE",
+				},
+			},
+			SelectedList: []domain.SelectedField{
+				{Field: "orders.id", DataType: "UUID"},
+				{Field: "user_details.email", DataType: "STRING"},
+			},
+		}
+		ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := c.Compile(context.Background(), ast, ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `EXISTS (SELECT 1 FROM jsonb_array_elements("orders"."recipients") AS elem WHERE elem->>'id' = CAST("user_details"."id" AS TEXT))`
+		if !strings.Contains(res.ExecutableQuery, want) {
+			t.Errorf("expected JSON array of objects EXISTS %s, got:\n%s", want, res.ExecutableQuery)
+		}
+	})
+
+	t.Run("Compiles ds_employee_view without inverted ANY condition", func(t *testing.T) {
+		ds := &domain.DataSet{
+			ID:            "ds_employee_view",
+			Name:          "employee_view",
+			ReferenceName: "employee_view",
+			BaseCollection: domain.BaseCollection{
+				Schema:     "iam",
+				Collection: "employees",
+			},
+			JoinCollections: []domain.JoinCollection{
+				{
+					Schema:              "iam",
+					FromCollection:      "employees",
+					FromCollectionField: "designation_id",
+					ToCollection:        "designations",
+					ToCollectionField:   "id",
+					NamedAs:             "designations_details",
+					JoinType:            domain.JoinLeft,
+					Cardinality:         "NONE",
+					OutputFormat:        "NONE",
+				},
+				{
+					Schema:              "iam",
+					FromCollection:      "employees",
+					FromCollectionField: "department_id",
+					ToCollection:        "departments",
+					ToCollectionField:   "id",
+					NamedAs:             "departments_details",
+					JoinType:            domain.JoinLeft,
+					Cardinality:         "NONE",
+					OutputFormat:        "NONE",
+				},
+				{
+					Schema:              "shared",
+					FromCollection:      "employees",
+					FromCollectionField: "country",
+					ToCollection:        "countries",
+					ToCollectionField:   "id",
+					NamedAs:             "countries_details",
+					JoinType:            domain.JoinLeft,
+					ConvertToString:     true,
+					Cardinality:         "NONE",
+					OutputFormat:        "NONE",
+				},
+				{
+					Schema:              "fleet",
+					FromCollection:      "employees",
+					FromCollectionField: "id",
+					ToCollection:        "driver_identification_details",
+					ToCollectionField:   "driver_id",
+					NamedAs:             "driver_identification_details",
+					JoinType:            domain.JoinLeft,
+					Cardinality:         "NONE",
+					OutputFormat:        "NONE",
+				},
+				{
+					Schema:              "fleet",
+					FromCollection:      "employees",
+					FromCollectionField: "id",
+					ToCollection:        "driver_driving_licenses",
+					ToCollectionField:   "driver_id",
+					NamedAs:             "driver_driving_licenses_details",
+					JoinType:            domain.JoinLeft,
+					Cardinality:         "NONE",
+					OutputFormat:        "NONE",
+				},
+				{
+					Schema:              "master",
+					FromCollection:      "employees",
+					FromCollectionField: "primary_plant_mine",
+					ToCollection:        "plant_mine",
+					ToCollectionField:   "id",
+					NamedAs:             "plant_mine_details",
+					JoinType:            domain.JoinLeft,
+					ConvertToString:     true,
+					CastMode:            "ANY_TO", // Inverted in user payload
+					Cardinality:         "MANY",
+					OutputFormat:        "JSON_ARRAY",
+				},
+			},
+			SelectedList: []domain.SelectedField{
+				{Field: "employees.id", HeaderName: "id", DataType: "UUID"},
+				{Field: "employees.name", HeaderName: "name", DataType: "TEXT"},
+				{Field: "employees.country", HeaderName: "country", DataType: "STRING"},
+				{Field: "employees.primary_plant_mine", HeaderName: "primary_plant_mine", DataType: "ARRAY"},
+				{Field: "countries_details.name", HeaderName: "countries_details_name", DataType: "STRING"},
+				{Field: "plant_mine_details.name", HeaderName: "plant_mine_name_alias", DataType: "STRING"},
+			},
+		}
+
+		ast, err := planner.NewPlanner(nil).BuildAST(context.Background(), ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := c.Compile(context.Background(), ast, ds)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Ensure correlated subquery for plant_mine_details uses scalar = ANY(array)
+		wantPlant := `WHERE CAST("plant_mine_details_many"."id" AS TEXT) = ANY(CAST("employees"."primary_plant_mine" AS TEXT[]))`
+		if !strings.Contains(res.ExecutableQuery, wantPlant) {
+			t.Errorf("expected plant_mine condition %s, got:\n%s", wantPlant, res.ExecutableQuery)
+		}
+
+		// Ensure inverted condition is NOT generated
+		badPlant := `CAST("employees"."primary_plant_mine" AS TEXT) = ANY(CAST("plant_mine_details_many"."id" AS TEXT[]))`
+		if strings.Contains(res.ExecutableQuery, badPlant) {
+			t.Fatalf("found inverted array condition in query:\n%s", res.ExecutableQuery)
+		}
+	})
+}
