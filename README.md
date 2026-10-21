@@ -218,3 +218,9 @@ func main() {
 	fmt.Println(p.DDLStatement)
 }
 ```
+
+## Strict metadata-based relationships
+
+For ID-based scalar, array, JSON, and cardinality-aware JOIN compilation, use
+[`CompileDynamicJoin` and `VerifyJoinCatalog`](DYNAMIC_JOINS.md). This separate API
+uses verified `DataModel`/`ModelConfig` metadata and rejects unsupported combinations.
