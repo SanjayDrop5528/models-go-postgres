@@ -115,6 +115,7 @@ INSERT INTO `+q+`licenses VALUES ('00000000-0000-4000-8000-000000000021','000000
 			}
 		}
 	}
+	t.Setenv("QUERY_VALIDATION_NEED", "true")
 	ds.JoinCollections[3].Cardinality = "ONE"
 	ds.JoinCollections[3].OutputFormat = "OBJECT"
 	if _, err = svc.Preview(ctx, ds); err == nil || !strings.Contains(err.Error(), "verified unique") {

@@ -47,3 +47,30 @@ func TestUUIDArrayMetadataProducesNativeDDL(t *testing.T) {
 		t.Fatal("untyped arrays must not be guessed as UUID")
 	}
 }
+
+func TestIsQueryValidationNeeded(t *testing.T) {
+	keys := []string{"QUERY_VALIDATION_NEED", "QueryValidationNeed", "QueryvalidaitonNeed", "QUERYVALIDATIONNEED", "QUERY_VALIDATION_NEEDED"}
+	clearAll := func() {
+		for _, k := range keys {
+			t.Setenv(k, "")
+		}
+	}
+
+	clearAll()
+	if isQueryValidationNeeded() {
+		t.Fatal("expected false by default")
+	}
+
+	for _, k := range []string{"QUERY_VALIDATION_NEED", "QueryValidationNeed", "QueryvalidaitonNeed"} {
+		clearAll()
+		t.Setenv(k, "True")
+		if !isQueryValidationNeeded() {
+			t.Fatalf("expected true for %s=True", k)
+		}
+		t.Setenv(k, "false")
+		if isQueryValidationNeeded() {
+			t.Fatalf("expected false for %s=false", k)
+		}
+	}
+}
+

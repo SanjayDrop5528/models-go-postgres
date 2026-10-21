@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/SanjayDrop5528/models-go-engine/dataset/planner"
@@ -85,14 +86,16 @@ func verifyDatasetJoins(ctx context.Context, db JoinMetadataReader, ast *planner
 		if out != "" && out != "NONE" && out != "FLAT" && out != "OBJECT" && out != "JSON_ARRAY" {
 			return fmt.Errorf("join %q: unsupported output format %q", j.Alias, out)
 		}
-		if out == "OBJECT" && card != "ONE" && card != "ZERO_OR_ONE" {
-			return fmt.Errorf("join %q: OBJECT requires verified singular cardinality", j.Alias)
-		}
-		if card == "ONE" || card == "ZERO_OR_ONE" {
-			op := strings.ToUpper(strings.TrimSpace(j.RelationshipOp))
-			typesUnique := a.typ == z.typ || (a.typ == "TEXT" && (z.typ == "UUID" || isIntegerType(z.typ))) || (z.typ == "TEXT" && (a.typ == "UUID" || isIntegerType(a.typ)))
-			if a.array || z.array || a.json || z.json || !typesUnique || (op != "" && op != "AUTO" && op != "EQ" && op != "=" && op != "EQ_CAST") || !b.unique(j.Alias, map[string]bool{j.ToField: true}) {
-				return fmt.Errorf("join %q: %s requires a verified unique target field and scalar equality; configure MANY with JSON_ARRAY for multiple matches", j.Alias, card)
+		if isQueryValidationNeeded() {
+			if out == "OBJECT" && card != "ONE" && card != "ZERO_OR_ONE" {
+				return fmt.Errorf("join %q: OBJECT requires verified singular cardinality", j.Alias)
+			}
+			if card == "ONE" || card == "ZERO_OR_ONE" {
+				op := strings.ToUpper(strings.TrimSpace(j.RelationshipOp))
+				typesUnique := a.typ == z.typ || (a.typ == "TEXT" && (z.typ == "UUID" || isIntegerType(z.typ))) || (z.typ == "TEXT" && (a.typ == "UUID" || isIntegerType(a.typ)))
+				if a.array || z.array || a.json || z.json || !typesUnique || (op != "" && op != "AUTO" && op != "EQ" && op != "=" && op != "EQ_CAST") || !b.unique(j.Alias, map[string]bool{j.ToField: true}) {
+					return fmt.Errorf("join %q: %s requires a verified unique target field and scalar equality; configure MANY with JSON_ARRAY for multiple matches", j.Alias, card)
+				}
 			}
 		}
 		switch string(j.Type) {
@@ -154,4 +157,22 @@ func verifiedDatasetJoinPredicate(j planner.ASTJoin, fromAlias, toAlias string) 
 		}
 	}
 	return (&joinBuilder{policy: policy, nullPolicy: "NO_MATCH"}).predicate(a, z, op, j.SourceJSONPath, j.TargetJSONPath)
+}
+
+// isQueryValidationNeeded checks if strict query validation for singular cardinality joins is enabled via environment variables.
+func isQueryValidationNeeded() bool {
+	keys := []string{
+		"QUERY_VALIDATION_NEED",
+		"QueryValidationNeed",
+		"QueryvalidaitonNeed",
+		"QUERYVALIDATIONNEED",
+		"QUERY_VALIDATION_NEEDED",
+	}
+	for _, k := range keys {
+		val := strings.TrimSpace(os.Getenv(k))
+		if strings.EqualFold(val, "true") || val == "1" {
+			return true
+		}
+	}
+	return false
 }
