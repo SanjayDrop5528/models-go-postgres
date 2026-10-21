@@ -22,7 +22,7 @@ import (
 )
 
 // PostgresDataSetCompiler compiles QueryAST into PostgreSQL SQL and Procedures/Functions.
-type PostgresDataSetCompiler struct{}
+type PostgresDataSetCompiler struct{ adapter *PostgresAdapter }
 
 // NewPostgresDataSetCompiler creates a new PostgreSQL dataset compiler instance.
 //
@@ -94,6 +94,23 @@ func (c *PostgresDataSetCompiler) Compile(ctx context.Context, ast *planner.Quer
 	if ast == nil {
 		return nil, domain.NewError(domain.ErrPipelineCompilationFailed, "cannot compile nil AST")
 	}
+	if ds == nil {
+		return nil, fmt.Errorf("cannot compile nil dataset")
+	}
+	copyAST := *ast
+	copyAST.Joins = append([]planner.ASTJoin(nil), ast.Joins...)
+	ast = &copyAST
+	if c.adapter != nil && len(ast.Joins) > 0 {
+		db, err := c.adapter.getDB(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if db != nil {
+			if err := verifyDatasetJoins(ctx, db, ast); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	saveMode := ds.SaveMode
 	if saveMode == "" {
@@ -146,7 +163,7 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 				if strings.EqualFold(j.OutputFormat, "NONE") || strings.EqualFold(j.Cardinality, "NONE") {
 					continue
 				}
-				if strings.EqualFold(j.Cardinality, "MANY") || strings.EqualFold(j.OutputFormat, "JSON_ARRAY") || strings.EqualFold(j.OutputFormat, "OBJECT") {
+				if datasetArrayOutput(j) || strings.EqualFold(j.OutputFormat, "OBJECT") {
 					isNestedRelation = true
 					break
 				}
@@ -173,7 +190,7 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 			selectCols = append(selectCols, fmt.Sprintf(`CASE WHEN "%s"."%s" IS NULL THEN NULL ELSE %s END AS "%s"`, j.Alias, j.ToField, objectExpr, j.Alias))
 			continue
 		}
-		if !strings.EqualFold(j.Cardinality, "MANY") && !strings.EqualFold(j.OutputFormat, "JSON_ARRAY") {
+		if !datasetArrayOutput(j) {
 			continue
 		}
 		targetTbl := fmt.Sprintf(`"%s"`, j.ToTable)
@@ -241,7 +258,7 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 	for _, j := range ast.Joins {
 		if strings.EqualFold(j.OutputFormat, "NONE") || strings.EqualFold(j.Cardinality, "NONE") {
 			// keep standard JOIN for flat fields
-		} else if strings.EqualFold(j.Cardinality, "MANY") || strings.EqualFold(j.OutputFormat, "JSON_ARRAY") {
+		} else if datasetArrayOutput(j) {
 			continue
 		}
 		jType := "LEFT JOIN"
@@ -260,7 +277,7 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 		if len(j.JoinFilter) > 0 {
 			var filterParts []string
 			for k, v := range j.JoinFilter {
-				filterParts = append(filterParts, fmt.Sprintf("\"%s\".\"%s\" = '%v'", j.Alias, k, v))
+				filterParts = append(filterParts, formatFilterCondition(j.Alias, k, v))
 			}
 			onCondition += " AND " + strings.Join(filterParts, " AND ")
 		}
@@ -318,6 +335,10 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 }
 
 // relationProjections returns fields selected from a specific joined relation.
+func datasetArrayOutput(j planner.ASTJoin) bool {
+	return strings.EqualFold(j.OutputFormat, "JSON_ARRAY") || (strings.EqualFold(j.Cardinality, "MANY") && !strings.EqualFold(j.OutputFormat, "FLAT") && !strings.EqualFold(j.OutputFormat, "NONE"))
+}
+
 func relationProjections(ast *planner.QueryAST, join planner.ASTJoin) []planner.ASTProjection {
 	var fields []planner.ASTProjection
 	for _, projection := range ast.Projections {
@@ -482,6 +503,10 @@ func lookupFieldDataType(table, field string, ast *planner.QueryAST, ds *domain.
 
 // buildPostgresJoinCondition generates the type-aware SQL join condition.
 func buildPostgresJoinCondition(j planner.ASTJoin, fromAlias, toAlias string) string {
+	if j.VerifiedTypes {
+		condition, _ := verifiedDatasetJoinPredicate(j, fromAlias, toAlias)
+		return condition // Validated by verifyDatasetJoins before rendering.
+	}
 	fromCol := fmt.Sprintf(`"%s"."%s"`, fromAlias, j.FromField)
 	toCol := fmt.Sprintf(`"%s"."%s"`, toAlias, j.ToField)
 
@@ -1011,7 +1036,7 @@ $$;`, baseSchema, baseSchema, cleanName, strings.Join(paramDefs, ", "), querySQL
 // Note:
 //   - The context controls cancellation and request lifetime.
 func (a *PostgresAdapter) CompileDataSet(ctx context.Context, ast *planner.QueryAST, ds *domain.DataSet) (*compiler.CompiledPipeline, error) {
-	return NewPostgresDataSetCompiler().Compile(ctx, ast, ds)
+	return (&PostgresDataSetCompiler{adapter: a}).Compile(ctx, ast, ds)
 }
 
 // DataSetCompiler returns the adapter.DataSetCompiler instance.
@@ -1043,7 +1068,7 @@ func (a *PostgresAdapter) CompileDataSet(ctx context.Context, ast *planner.Query
 // Note:
 //   - Callers should preserve the documented ownership and lifecycle of supplied values.
 func (a *PostgresAdapter) DataSetCompiler() adapter.DataSetCompiler {
-	return &genericCompilerWrapper{c: NewPostgresDataSetCompiler()}
+	return &genericCompilerWrapper{c: &PostgresDataSetCompiler{adapter: a}}
 }
 
 type genericCompilerWrapper struct {

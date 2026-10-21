@@ -99,6 +99,9 @@ func ToPostgresType(attr schema.SchemaAttribute) string {
 		return "BYTEA"
 
 	case model.TypeArray:
+		if attr.ElementType != "" && attr.ElementType != model.TypeArray {
+			return ToPostgresType(schema.SchemaAttribute{Type: model.NormalizeDataType(string(attr.ElementType))}) + "[]"
+		}
 		return "TEXT[]"
 
 	default:
