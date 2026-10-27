@@ -172,9 +172,11 @@ func (c *PostgresDataSetCompiler) buildSelectSQL(ast *planner.QueryAST, paramete
 		if isNestedRelation {
 			continue
 		}
-		colExpr := fmt.Sprintf("\"%s\".\"%s\"", p.SourceTable, p.SourceField)
+		colExpr := formatPostgresColumnExpr(p.SourceTable, p.SourceField)
 		if p.Alias != "" && p.Alias != p.SourceField {
 			colExpr += fmt.Sprintf(" AS \"%s\"", p.Alias)
+		} else if strings.Contains(p.SourceField, ".") {
+			colExpr += fmt.Sprintf(" AS \"%s\"", p.SourceField)
 		}
 		selectCols = append(selectCols, colExpr)
 	}
@@ -357,6 +359,22 @@ func relationProjectionKey(join planner.ASTJoin, projection planner.ASTProjectio
 	return projection.Alias
 }
 
+// formatPostgresColumnExpr formats a column expression, extracting nested json paths with ->> or #>> when a dot is present.
+func formatPostgresColumnExpr(table, field string) string {
+	if !strings.Contains(field, ".") {
+		return fmt.Sprintf(`"%s"."%s"`, table, field)
+	}
+	parts := strings.Split(field, ".")
+	if len(parts) == 2 {
+		return fmt.Sprintf(`("%s"."%s"->>'%s')`, table, parts[0], parts[1])
+	}
+	keys := make([]string, len(parts)-1)
+	for i, k := range parts[1:] {
+		keys[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(k, "'", "''"))
+	}
+	return fmt.Sprintf(`("%s"."%s"#>>ARRAY[%s]::text[])`, table, parts[0], strings.Join(keys, ", "))
+}
+
 // postgresJSONObject builds a JSON object containing only selected relation fields.
 func postgresJSONObject(tableAlias string, fields []planner.ASTProjection) string {
 	if len(fields) == 0 {
@@ -366,7 +384,8 @@ func postgresJSONObject(tableAlias string, fields []planner.ASTProjection) strin
 	join := planner.ASTJoin{Alias: strings.TrimSuffix(tableAlias, "_many")}
 	for _, field := range fields {
 		key := strings.ReplaceAll(relationProjectionKey(join, field), "'", "''")
-		args = append(args, fmt.Sprintf("'%s'", key), fmt.Sprintf(`"%s"."%s"`, tableAlias, field.SourceField))
+		colVal := formatPostgresColumnExpr(tableAlias, field.SourceField)
+		args = append(args, fmt.Sprintf("'%s'", key), colVal)
 	}
 	return "jsonb_build_object(" + strings.Join(args, ", ") + ")"
 }
