@@ -5,11 +5,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/SanjayDrop5528/models-go-engine/dataset/domain"
 	"github.com/SanjayDrop5528/models-go-engine/dataset/planner"
 	"github.com/SanjayDrop5528/models-go-engine/dataset/resolver"
 	"github.com/SanjayDrop5528/models-go-engine/diff"
 	"github.com/SanjayDrop5528/models-go-engine/model"
+	"github.com/SanjayDrop5528/models-go-engine/plan"
 	"github.com/SanjayDrop5528/models-go-engine/query"
 	"github.com/SanjayDrop5528/models-go-engine/schema"
 	"github.com/SanjayDrop5528/models-go-postgres"
@@ -1126,4 +1128,134 @@ func TestPostgresDataSetCompiler_TypeAwareRelationshipResolver(t *testing.T) {
 			t.Fatalf("found inverted array condition in query:\n%s", res.ExecutableQuery)
 		}
 	})
+}
+
+func TestPostgres_DDL_CreateTable_ProcurementPurchaseRequisitionItems(t *testing.T) {
+	gen := postgres.NewDDLGenerator()
+
+	des := &schema.Schema{
+		Name: "procurement.purchase_requisition_items",
+		Attributes: []schema.SchemaAttribute{
+			{Name: "id", Type: model.TypeUUID, PrimaryKey: true, Nullable: false},
+			{Name: "item_code", Type: model.TypeString, Length: 50, Nullable: false},
+			{Name: "quantity", Type: model.TypeDecimal, Precision: 10, Scale: 2, Nullable: false},
+		},
+		PrimaryKey: &schema.SchemaKey{Columns: []string{"id"}},
+	}
+
+	op := diff.SchemaOperation{
+		Type:        diff.OpCreateTable,
+		TargetTable: "procurement.purchase_requisition_items",
+		ObjectName:  "procurement.purchase_requisition_items",
+		After:       des,
+	}
+
+	stmt, err := gen.GenerateStatement(op)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(stmt, `CREATE SCHEMA IF NOT EXISTS "procurement";`) {
+		t.Fatalf("expected CREATE SCHEMA for procurement, got:\n%s", stmt)
+	}
+	if !strings.Contains(stmt, `CREATE TABLE IF NOT EXISTS "procurement"."purchase_requisition_items"`) {
+		t.Fatalf("expected quoted schema and table in CREATE TABLE, got:\n%s", stmt)
+	}
+	if !strings.Contains(stmt, `"item_code" VARCHAR(50) NOT NULL`) {
+		t.Fatalf("expected item_code column, got:\n%s", stmt)
+	}
+
+	// Test execution in ApplySchemaChange with sqlmock to verify statements are executed intact
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock error: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "procurement";`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS "procurement"\."purchase_requisition_items"`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	adapter := postgres.NewPostgresAdapterFromDB(db)
+	p := &plan.SchemaPlan{
+		ModelID:     "purchase_requisition_items",
+		StorageName: "procurement.purchase_requisition_items",
+		Operations:  []diff.SchemaOperation{op},
+	}
+
+	if err := adapter.ApplySchemaChange(context.Background(), p); err != nil {
+		t.Fatalf("ApplySchemaChange failed: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestPostgres_DDL_CreateTable_EmptyAttributesFallback(t *testing.T) {
+	gen := postgres.NewDDLGenerator()
+
+	des := &schema.Schema{
+		Name:       "procurement.empty_table",
+		Attributes: []schema.SchemaAttribute{},
+	}
+
+	op := diff.SchemaOperation{
+		Type:        diff.OpCreateTable,
+		TargetTable: "procurement.empty_table",
+		ObjectName:  "procurement.empty_table",
+		After:       des,
+	}
+
+	stmt, err := gen.GenerateStatement(op)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Must never generate empty table without columns
+	if strings.Contains(stmt, `empty_table" ()`) || strings.Contains(stmt, "empty_table\" (\n\n)") {
+		t.Fatalf("generated invalid empty column list, stmt was:\n%s", stmt)
+	}
+	if !strings.Contains(stmt, `"id" UUID PRIMARY KEY DEFAULT gen_random_uuid()`) {
+		t.Fatalf("expected default id primary key fallback, got:\n%s", stmt)
+	}
+}
+
+func TestPostgres_SplitSQLStatements(t *testing.T) {
+	sqlScript := `
+		-- Create schema first
+		CREATE SCHEMA IF NOT EXISTS "procurement";
+
+		/* Create main table
+		   with comments containing ; semicolons
+		*/
+		CREATE TABLE IF NOT EXISTS "procurement"."purchase_requisition_items" (
+			"id" UUID NOT NULL,
+			"note" TEXT DEFAULT 'default;with;semicolons',
+			"description" VARCHAR(255),
+			PRIMARY KEY ("id")
+		);
+
+		ALTER TABLE "procurement"."purchase_requisition_items" ADD CONSTRAINT "fk_1" FOREIGN KEY ("req_id") REFERENCES "procurement"."purchase_requisitions" ("id");
+	`
+
+	stmts := postgres.SplitSQLStatementsForTest(sqlScript)
+	if len(stmts) != 3 {
+		t.Fatalf("expected 3 statements, got %d:\n%v", len(stmts), stmts)
+	}
+
+	if !strings.HasPrefix(strings.TrimSpace(stmts[0]), "-- Create schema first\n\t\tCREATE SCHEMA IF NOT EXISTS \"procurement\";") {
+		t.Errorf("unexpected stmt 0: %s", stmts[0])
+	}
+
+	if !strings.Contains(stmts[1], `CREATE TABLE IF NOT EXISTS "procurement"."purchase_requisition_items"`) ||
+		!strings.Contains(stmts[1], `"note" TEXT DEFAULT 'default;with;semicolons'`) ||
+		!strings.Contains(stmts[1], `PRIMARY KEY ("id")`) {
+		t.Errorf("unexpected stmt 1: %s", stmts[1])
+	}
+
+	if !strings.Contains(stmts[2], `ADD CONSTRAINT "fk_1"`) {
+		t.Errorf("unexpected stmt 2: %s", stmts[2])
+	}
 }

@@ -270,13 +270,201 @@ func (g *DDLGenerator) buildCreateTable(s *schema.Schema) string {
 		lines = append(lines, fmt.Sprintf("    PRIMARY KEY (%s)", strings.Join(quotedPKs, ", ")))
 	}
 
+	// Fallback: if no attributes are defined, ensure a default UUID primary key so table creation is valid
+	if len(lines) == 0 {
+		lines = append(lines, "    \"id\" UUID PRIMARY KEY DEFAULT gen_random_uuid()")
+	}
+
 	tableStmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n%s\n);", quoteIdent(s.Name), strings.Join(lines, ",\n"))
+
+	var stmts []string
+	if strings.Contains(s.Name, ".") {
+		parts := strings.SplitN(s.Name, ".", 2)
+		schemaPart := strings.TrimSpace(parts[0])
+		if schemaPart != "" && schemaPart != "public" {
+			stmts = append(stmts, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s;", quoteIdent(schemaPart)))
+		}
+	}
+	stmts = append(stmts, tableStmt)
 
 	fkStmts := g.buildForeignKeyStatements(s)
 	if len(fkStmts) > 0 {
-		return tableStmt + "\n" + strings.Join(fkStmts, "\n")
+		stmts = append(stmts, fkStmts...)
 	}
-	return tableStmt
+	return strings.Join(stmts, "\n")
+}
+
+// SplitSQLStatementsForTest exposes splitSQLStatements for testing.
+func SplitSQLStatementsForTest(sql string) []string {
+	return splitSQLStatements(sql)
+}
+
+// splitSQLStatements parses a multi-statement SQL script into individual executable statements.
+// It respects single-quote string literals ('...'), double-quote identifiers ("..."),
+// dollar quotes ($$...$$ or $tag$...$tag$), line comments (-- ...), and block comments (/* ... */).
+func splitSQLStatements(sql string) []string {
+	var statements []string
+	var current strings.Builder
+
+	inSingleQuote := false
+	inDoubleQuote := false
+	inDollarQuote := false
+	dollarTag := ""
+	inLineComment := false
+	inBlockComment := false
+
+	runes := []rune(sql)
+	n := len(runes)
+
+	for i := 0; i < n; i++ {
+		r := runes[i]
+
+		// Handle comments
+		if inLineComment {
+			current.WriteRune(r)
+			if r == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+
+		if inBlockComment {
+			current.WriteRune(r)
+			if r == '*' && i+1 < n && runes[i+1] == '/' {
+				current.WriteRune('/')
+				i++
+				inBlockComment = false
+			}
+			continue
+		}
+
+		// Handle dollar quotes ($tag$...$tag$ or $$...$$)
+		if inDollarQuote {
+			current.WriteRune(r)
+			if r == '$' {
+				tagLen := len(dollarTag)
+				if i >= tagLen-1 {
+					matched := true
+					for j := 0; j < tagLen; j++ {
+						if runes[i-tagLen+1+j] != rune(dollarTag[j]) {
+							matched = false
+							break
+						}
+					}
+					if matched {
+						inDollarQuote = false
+						dollarTag = ""
+					}
+				}
+			}
+			continue
+		}
+
+		// Handle single-quote literals
+		if inSingleQuote {
+			current.WriteRune(r)
+			if r == '\'' {
+				if i+1 < n && runes[i+1] == '\'' {
+					current.WriteRune('\'')
+					i++
+				} else {
+					inSingleQuote = false
+				}
+			}
+			continue
+		}
+
+		// Handle double-quote identifiers
+		if inDoubleQuote {
+			current.WriteRune(r)
+			if r == '"' {
+				if i+1 < n && runes[i+1] == '"' {
+					current.WriteRune('"')
+					i++
+				} else {
+					inDoubleQuote = false
+				}
+			}
+			continue
+		}
+
+		// Outside quotes and comments:
+		// Check for line comment start
+		if r == '-' && i+1 < n && runes[i+1] == '-' {
+			current.WriteRune(r)
+			current.WriteRune('-')
+			i++
+			inLineComment = true
+			continue
+		}
+
+		// Check for block comment start
+		if r == '/' && i+1 < n && runes[i+1] == '*' {
+			current.WriteRune(r)
+			current.WriteRune('*')
+			i++
+			inBlockComment = true
+			continue
+		}
+
+		// Check for single quote start
+		if r == '\'' {
+			inSingleQuote = true
+			current.WriteRune(r)
+			continue
+		}
+
+		// Check for double quote start
+		if r == '"' {
+			inDoubleQuote = true
+			current.WriteRune(r)
+			continue
+		}
+
+		// Check for dollar-quote start: $tag$ or $$
+		if r == '$' {
+			tagEnd := -1
+			for j := i + 1; j < n; j++ {
+				if runes[j] == '$' {
+					tagEnd = j
+					break
+				}
+				c := runes[j]
+				if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+					break
+				}
+			}
+			if tagEnd != -1 {
+				dollarTag = string(runes[i : tagEnd+1])
+				inDollarQuote = true
+				for k := i; k <= tagEnd; k++ {
+					current.WriteRune(runes[k])
+				}
+				i = tagEnd
+				continue
+			}
+		}
+
+		// Semicolon outside any quote/comment terminates the statement
+		if r == ';' {
+			current.WriteRune(';')
+			stmt := strings.TrimSpace(current.String())
+			if stmt != "" && stmt != ";" {
+				statements = append(statements, stmt)
+			}
+			current.Reset()
+			continue
+		}
+
+		current.WriteRune(r)
+	}
+
+	remaining := strings.TrimSpace(current.String())
+	if remaining != "" && remaining != ";" {
+		statements = append(statements, remaining)
+	}
+
+	return statements
 }
 
 func (g *DDLGenerator) buildForeignKeyStatements(s *schema.Schema) []string {

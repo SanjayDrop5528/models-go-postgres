@@ -940,7 +940,7 @@ func (a *PostgresAdapter) ApplySchemaChange(ctx context.Context, p *plan.SchemaP
 	defer tx.Rollback()
 
 	for _, stmt := range statements {
-		for _, rawStmt := range strings.Split(stmt, "\n") {
+		for _, rawStmt := range splitSQLStatements(stmt) {
 			rawStmt = strings.TrimSpace(rawStmt)
 			if rawStmt == "" {
 				continue
