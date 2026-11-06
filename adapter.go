@@ -520,6 +520,7 @@ func (a *PostgresAdapter) ensureMetadataTablesInternal(ctx context.Context, db *
 		name VARCHAR(255) NOT NULL,
 		reference_name VARCHAR(100) NOT NULL UNIQUE,
 		driver VARCHAR(50) NOT NULL DEFAULT 'postgres',
+		pipeline_mode VARCHAR(50) DEFAULT 'builder',
 		base_collection JSONB NOT NULL,
 		join_collections JSONB DEFAULT '[]'::jsonb,
 		custom_columns JSONB DEFAULT '[]'::jsonb,
@@ -551,6 +552,9 @@ func (a *PostgresAdapter) ensureMetadataTablesInternal(ctx context.Context, db *
 	}
 	if _, err := db.ExecContext(ctx, createDSTable); err != nil {
 		return fmt.Errorf("failed to create 'metadata_catalog.dataset' table: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE metadata_catalog.dataset ADD COLUMN IF NOT EXISTS pipeline_mode VARCHAR(50) DEFAULT 'builder'`); err != nil {
+		log.Printf("[PostgreSQL] Note: could not add dataset.pipeline_mode: %v", err)
 	}
 
 	log.Printf("[PostgreSQL] ✔ System metadata catalog tables ('metadata_catalog.model_configs', 'metadata_catalog.data_models', 'metadata_catalog.dataset') verified & active.")
