@@ -519,6 +519,7 @@ func (a *PostgresAdapter) ensureMetadataTablesInternal(ctx context.Context, db *
 		id VARCHAR(100) PRIMARY KEY,
 		name VARCHAR(255) NOT NULL,
 		reference_name VARCHAR(100) NOT NULL UNIQUE,
+		description TEXT,
 		driver VARCHAR(50) NOT NULL DEFAULT 'postgres',
 		pipeline_mode VARCHAR(50) DEFAULT 'builder',
 		base_collection JSONB NOT NULL,
@@ -556,6 +557,10 @@ func (a *PostgresAdapter) ensureMetadataTablesInternal(ctx context.Context, db *
 	if _, err := db.ExecContext(ctx, `ALTER TABLE metadata_catalog.dataset ADD COLUMN IF NOT EXISTS pipeline_mode VARCHAR(50) DEFAULT 'builder'`); err != nil {
 		log.Printf("[PostgreSQL] Note: could not add dataset.pipeline_mode: %v", err)
 	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE metadata_catalog.dataset ADD COLUMN IF NOT EXISTS description TEXT`); err != nil {
+		log.Printf("[PostgreSQL] Note: could not add dataset.description: %v", err)
+	}
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_dataset_conversation_id ON metadata_catalog.dataset(conversation_id)`)
 	_, _ = db.ExecContext(ctx, `UPDATE metadata_catalog.dataset SET pipeline_mode = 'raw' WHERE (is_raw = true OR dataset_type = 'RAW' OR dataset_type = 'raw') AND (pipeline_mode IS NULL OR pipeline_mode = 'builder')`)
 
 	log.Printf("[PostgreSQL] ✔ System metadata catalog tables ('metadata_catalog.model_configs', 'metadata_catalog.data_models', 'metadata_catalog.dataset') verified & active.")
